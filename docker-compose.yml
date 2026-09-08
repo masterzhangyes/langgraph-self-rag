@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  backend:
+    build: ./backend
+    container_name: qa-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - data-volume:/app/data
+      - chroma-volume:/app/chroma_db
+      - uploads-volume:/app/uploads
+      - logs-volume:/app/logs
+    environment:
+      # 下面变量仅作为镜像默认值；本地开发时 backend/.env（被 bind mount
+      # 到 /app/.env）会被 pydantic-settings 自动读取并覆盖。
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://open.bigmodel.cn/api/paas/v4/}
+      - LLM_MODEL=${LLM_MODEL:-glm-4-flash}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-embedding-3}
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: qa-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  data-volume:
+    driver: local
+  chroma-volume:
+    driver: local
+  uploads-volume:
+    driver: local
+  logs-volume:
+    driver: local

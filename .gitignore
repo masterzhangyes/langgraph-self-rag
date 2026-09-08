@@ -1,0 +1,69 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+.venv/
+venv/
+env/
+.eggs/
+
+# 向量数据库 - 不应提交到 Git（运行时产生）
+chroma_db/
+chroma_*/
+bm25_cache/
+
+# 数据库文件（运行时产生）
+data/
+*.db
+*.sqlite3
+
+# 上传文件（运行时产生）
+uploads/*
+!uploads/.gitkeep
+temp/
+
+# 日志
+logs/
+*.log
+/log/*.log
+
+# 环境变量（含密钥，绝不可提交）
+.env
+.env.local
+.env.*.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Node / 前端
+node_modules/
+dist/
+frontend/dist/
+*.local
+
+# Docker
+.docker/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# 测试
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# 其他
+*.bak
+*.tmp
