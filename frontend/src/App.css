@@ -2692,3 +2692,206 @@ html.dark .input-wrapper { box-shadow: none; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .spinning { animation: spin 0.8s linear infinite; }
 
+/* ══════════════════════════════════════════════════════════
+   v2.4 知识库面板重构（Tab 式布局 / 文档列表 / 折叠危险区）
+   ══════════════════════════════════════════════════════════ */
+
+/* ─── 概览区：状态徽章与统计同行，更紧凑 ─── */
+.kb-meta-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.kb-meta-stats {
+  font-size: 11.5px;
+  color: var(--text-hint);
+  white-space: nowrap;
+}
+
+/* ─── 切换行：下拉框 + 新建小按钮 ─── */
+.kb-switch-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.kb-switch-row .kb-select { flex: 1; min-width: 0; }
+.kb-switch-row .hint { flex: 1; font-size: 12px; }
+.kb-add-btn {
+  flex-shrink: 0;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  color: var(--text-secondary);
+}
+.kb-add-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-light);
+}
+
+/* ─── Tab 条 ─── */
+.kb-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  margin: 0 14px;
+  padding: 4px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+}
+.kb-tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 7px 0;
+  border: none;
+  border-radius: calc(var(--radius-sm) - 3px);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.kb-tab:hover { color: var(--text-accent); }
+.kb-tab.active {
+  background: var(--bg-card-strong);
+  color: var(--text-accent);
+  font-weight: 600;
+  box-shadow: var(--shadow-sm);
+}
+
+/* ─── Tab 内容区 ─── */
+.kb-tab-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px 14px;
+  overflow-y: auto;
+}
+
+/* ─── 文档列表 ─── */
+.doc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+}
+.doc-empty { text-align: center; padding: 10px 0; }
+.doc-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  font-size: 12px;
+  color: var(--text-secondary);
+  transition: all 0.2s;
+}
+.doc-item:hover { border-color: var(--border-glow); }
+.doc-item > svg { flex-shrink: 0; color: var(--accent); opacity: 0.8; }
+.doc-item.confirming {
+  border-color: rgba(239, 68, 68, 0.45);
+  background: rgba(239, 68, 68, 0.06);
+}
+.doc-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+.doc-chunks {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-hint);
+  white-space: nowrap;
+}
+.doc-del {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+  border: none;
+  background: none;
+  color: var(--text-hint);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 3px 6px;
+  border-radius: 6px;
+  opacity: 0;
+  transition: all 0.15s;
+}
+.doc-item:hover .doc-del,
+.doc-item.confirming .doc-del { opacity: 1; }
+.doc-del:hover { color: var(--danger); background: rgba(239, 68, 68, 0.08); }
+.doc-item.confirming .doc-del {
+  color: var(--danger);
+  background: rgba(239, 68, 68, 0.12);
+  font-weight: 600;
+}
+.doc-del span { white-space: nowrap; }
+@media (hover: none) { .doc-del { opacity: 0.75; } }
+
+/* ─── 网页批量导入 ─── */
+.web-urls-input {
+  width: 100%;
+  min-height: 110px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 12.5px;
+  font-family: inherit;
+  line-height: 1.6;
+  resize: vertical;
+  outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.web-urls-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-light);
+}
+.web-urls-input:disabled { opacity: 0.6; }
+.web-load-btn {
+  width: 100%;
+  justify-content: center;
+}
+.web-load-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+
+/* ─── 危险操作折叠区 ─── */
+.danger-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--text-hint);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color 0.2s;
+}
+.danger-toggle:hover { color: var(--danger); }
+.danger-toggle .chev {
+  width: 7px;
+  height: 7px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 0.25s;
+}
+.danger-toggle .chev.up { transform: rotate(45deg); }
+.danger-zone .btn-danger { margin-top: 8px; }
+
+

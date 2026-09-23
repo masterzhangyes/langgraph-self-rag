@@ -220,7 +220,7 @@ class KBListResponse(BaseModel):
 class UploadResponse(BaseModel):
     """
     文件上传响应模型
-    
+
     文件上传并处理完成后返回的结果，告知前端上传的处理情况。
     """
     # 处理结果的消息描述（如 "上传成功" 或错误提示）
@@ -231,6 +231,41 @@ class UploadResponse(BaseModel):
     file_count: int
     # 文件被导入的目标知识库名称
     kb_name: str
+
+
+class KBDocumentItem(BaseModel):
+    """
+    知识库内单个文档条目（v2.4 新增）
+
+    按 metadata.source 聚合后的文档粒度（而非 chunk 粒度），
+    用于前端「文档列表」展示与单文档删除。
+    """
+    # 文档来源标识：上传文件的原名，或网页 URL
+    source: str = Field(..., description="来源（文件名或 URL）")
+    # 该文档被切分后产生的文本块总数
+    chunk_count: int = Field(..., description="文本块数")
+
+
+class KBDocumentsResponse(BaseModel):
+    """文档列表响应（v2.4 新增）"""
+    kb_name: str = Field(..., description="知识库名称")
+    documents: List[KBDocumentItem] = Field(default_factory=list, description="文档列表")
+
+
+class KBCreateRequest(BaseModel):
+    """
+    新建知识库请求（v2.4 新增）
+
+    显式创建（区别于上传时隐式创建），创建后立刻出现在列表中。
+    """
+    name: str = Field(..., min_length=1, max_length=64, description="知识库名称")
+
+
+class KBCreateResponse(BaseModel):
+    """新建知识库响应（v2.4 新增）"""
+    message: str = Field(..., description="结果消息")
+    name: str = Field(..., description="知识库逻辑名")
+    is_public: bool = Field(default=False, description="是否公共库")
 
 
 # ─────────────────── 评估相关模型 ───────────────────

@@ -69,6 +69,7 @@ from core.config import settings
 from api.models import (
     ChatRequest, ChatResponse, WebLoadRequest,
     KBStatsResponse, KBListResponse, UploadResponse,
+    KBDocumentsResponse, KBCreateRequest, KBCreateResponse,
     EvaluationRequest, EvaluationResponse,
 )
 
@@ -617,6 +618,117 @@ async def api_kb_stats_default():
                            chunk_count=stats.get("chunk_count", 0),
                            document_count=stats.get("document_count", 0),
                            is_public=True)
+
+
+@app.post("/api/kb/create", response_model=KBCreateResponse)
+async def api_kb_create(req: KBCreateRequest, user: dict = Depends(get_current_user)):
+    """
+    新建（个人）知识库 — 需登录（v2.4 新增）。
+
+    POST /api/kb/create
+    Body: {"name": "我的笔记"}
+
+    与旧版「上传时隐式创建」的区别:
+        显式创建后知识库立刻出现在 /api/kb/list 中，
+        无需先上传一份文档。
+
+    规则:
+        · 同名个人库已存在 → 幂等返回（提示已存在）
+        · 同名公共库已存在且非管理员 → 409 提示换名
+        · 保留字 db / default → 400
+
+    错误:
+        400 → 名称为保留字或为空
+        401 → 未登录
+        409 → 与公共库重名
+    """
+    from infrastructure import kb_store
+
+    name = req.name.strip()
+    if not name or name in ("db", "default"):
+        raise HTTPException(status_code=400, detail='知识库名称不能为空，且不能使用保留字 "db" / "default"')
+
+    # 与公共库重名: 普通用户无法写入公共库，直接引导换名
+    pub = await kb_store.get_kb(name, None)
+    if pub is not None and user["role"] != "admin":
+        raise HTTPException(status_code=409, detail=f"公共知识库 [{name}] 已存在，请换一个名称")
+
+    existing = await kb_store.get_kb(name, user["id"])
+    if existing is not None:
+        return KBCreateResponse(message=f"知识库 [{name}] 已存在", name=name, is_public=False)
+
+    kb = await kb_store.register_kb(name, user["id"])
+    return KBCreateResponse(message=f"知识库 [{name}] 已创建", name=kb["name"], is_public=False)
+
+
+@app.get("/api/kb/{kb_name}/documents", response_model=KBDocumentsResponse)
+async def api_kb_documents(kb_name: str, user: dict = Depends(get_optional_user)):
+    """
+    列出知识库内全部文档（按来源聚合）— 读权限（v2.4 新增）。
+
+    GET /api/kb/{kb_name}/documents
+
+    返回:
+        {
+            "kb_name": "我的笔记",
+            "documents": [
+                {"source": "报告.pdf", "chunk_count": 12},
+                {"source": "https://example.com", "chunk_count": 3},
+            ]
+        }
+
+    错误:
+        404 → 知识库不存在或无权访问（不泄露他人库的存在性）
+    """
+    from core.rag_chain import list_documents
+    from infrastructure import kb_store
+
+    kb = await kb_store.resolve_readable(kb_name, user)
+    if kb is None:
+        raise HTTPException(status_code=404, detail=f"知识库 [{kb_name}] 不存在或无权访问")
+
+    # list_documents 内含 Chroma 初始化（同步 IO），放线程池避免阻塞事件循环
+    documents = await asyncio.to_thread(list_documents, kb["physical_name"])
+    return KBDocumentsResponse(kb_name=kb["name"], documents=documents)
+
+
+@app.delete("/api/kb/{kb_name}/documents")
+async def api_kb_delete_document(
+    kb_name: str,
+    source: str,
+    user: dict = Depends(get_current_user),
+):
+    """
+    删除知识库中指定来源（source）的全部文本块 — 写权限（v2.4 新增）。
+
+    DELETE /api/kb/{kb_name}/documents?source=报告.pdf
+
+    隔离规则: 同 /api/kb/upload（本人私有库 / 管理员任意库）。
+
+    返回:
+        {"message": "已删除 [报告.pdf]（12 块）", "deleted": 12}
+
+    错误:
+        401 → 未登录
+        403 → 公共库仅管理员可写
+        404 → 文档不存在于该知识库
+    """
+    from core.rag_chain import delete_document
+    from infrastructure import kb_store
+
+    kb = await _resolve_writable_kb(kb_name, user)
+
+    # 删除 + 重建 BM25 索引是同步重操作，放线程池
+    deleted = await asyncio.to_thread(delete_document, kb["physical_name"], source)
+    if deleted == 0:
+        raise HTTPException(
+            status_code=404,
+            detail=f"文档 [{source}] 不存在于知识库 [{kb['name']}]",
+        )
+
+    if kb.get("id"):
+        await kb_store.touch_kb(kb["id"])
+    return {"message": f"已删除 [{source}]（{deleted} 块）", "deleted": deleted}
 
 
 async def _resolve_writable_kb(kb_name: str, user: dict) -> dict:

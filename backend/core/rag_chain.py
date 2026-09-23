@@ -254,6 +254,32 @@ async def get_hybrid_retriever(kb_name: str = "default") -> Optional[HybridRetri
 # 以下函数负责加载各类文档（txt/pdf/csv/md/网页），
 # 将其切分为文本块并存入向量数据库。
 
+def _load_docx(file_path: str) -> List[Document]:
+    """
+    加载 Word 文档（.docx）
+
+    基于 python-docx 的轻量实现，避免引入 unstructured 全家桶
+    （后者依赖系统级二进制，部署成本高）。提取内容:
+      · 正文段落（跳过空段）
+      · 表格（每行单元格以 " | " 拼接为一行文本）
+    """
+    from docx import Document as DocxDocument
+
+    doc = DocxDocument(file_path)
+    parts = [p.text for p in doc.paragraphs if p.text.strip()]
+    for table in doc.tables:
+        for row in table.rows:
+            cells = [c.text.strip() for c in row.cells if c.text.strip()]
+            if cells:
+                parts.append(" | ".join(cells))
+    if not parts:
+        raise ValueError(f"Word 文档无可见文本（可能是图片型/空文档）: {file_path}")
+    return [Document(
+        page_content="\n\n".join(parts),
+        metadata={"source": os.path.basename(file_path)},
+    )]
+
+
 def _load_document(file_path: str) -> List[Document]:
     """
     加载单个文档文件
@@ -262,6 +288,7 @@ def _load_document(file_path: str) -> List[Document]:
       - .txt / .md: 使用 TextLoader（UTF-8 编码）
       - .pdf: 使用 PyPDFLoader
       - .csv: 使用 CSVLoader
+      - .docx: 使用 python-docx 轻量解析
     
     加载后会自动为每个文档片段添加 source 元数据，
     记录该文档的原始文件名，便于后续引用展示。
@@ -282,6 +309,7 @@ def _load_document(file_path: str) -> List[Document]:
         ".pdf": lambda p: PyPDFLoader(p),
         ".csv": lambda p: CSVLoader(p),
         ".md": lambda p: TextLoader(p, encoding="utf-8"),
+        ".docx": _load_docx,
     }
 
     if ext not in loaders:
@@ -420,16 +448,94 @@ def clear_knowledge_base(kb_name: str = "default"):
         del _kb_cache[kb_name]
 
 
+def list_documents(kb_name: str = "default") -> List[dict]:
+    """
+    列出知识库内全部文档（按 source 元数据聚合）
+
+    用于前端的「文档列表」展示:
+        [{"source": "报告.pdf", "chunk_count": 12}, ...]
+    按 chunk 数降序排列。
+
+    Args:
+        kb_name: 知识库物理名
+
+    Returns:
+        文档信息列表；空库返回 []
+    """
+    kb_path = _get_kb_path(kb_name)
+    if not os.path.exists(kb_path) or not os.listdir(kb_path):
+        return []
+
+    deps = get_deps()
+    vs = Chroma(persist_directory=kb_path, embedding_function=deps.embeddings)
+    data = vs.get(include=["metadatas"])
+
+    agg: dict = {}
+    for meta in data["metadatas"]:
+        source = (meta or {}).get("source", "未知来源")
+        agg[source] = agg.get(source, 0) + 1
+
+    return [
+        {"source": s, "chunk_count": c}
+        for s, c in sorted(agg.items(), key=lambda x: -x[1])
+    ]
+
+
+def delete_document(kb_name: str, source: str) -> int:
+    """
+    删除知识库中指定来源（source）的全部文本块
+
+    流程:
+      1. 按 where={"source": source} 查出对应 chunk 的 ids
+      2. 不存在 → 返回 0（调用方转 404）
+      3. 存在 → 调 Chroma 公开 delete(ids=...) 删除
+      4. 作废旧缓存并重建 BM25 索引（内容已变）
+
+    Args:
+        kb_name: 知识库物理名
+        source:  文档来源标识（上传时的文件名 / 网页 URL）
+
+    Returns:
+        实际删除的 chunk 数量
+    """
+    kb_path = _get_kb_path(kb_name)
+    if not os.path.exists(kb_path) or not os.listdir(kb_path):
+        return 0
+
+    deps = get_deps()
+    vs = Chroma(persist_directory=kb_path, embedding_function=deps.embeddings)
+
+    # 先查 ids：既确认存在性，也拿到待删数量
+    data = vs.get(where={"source": source}, include=["metadatas"])
+    ids = data["ids"]
+    if not ids:
+        return 0
+
+    vs.delete(ids=ids)  # LangChain Chroma 公开 API
+
+    # 内容已变: 作废旧缓存并重建 BM25 索引
+    if kb_name in _kb_cache:
+        del _kb_cache[kb_name]
+    retriever = HybridRetriever(vs)
+    retriever.build_bm25_index()
+    _kb_cache[kb_name] = {"vectorstore": vs, "retriever": retriever}
+
+    logger.info(f"已从 [{kb_name}] 删除文档 [{source}]（{len(ids)} 块）")
+    return len(ids)
+
+
 def get_kb_stats(kb_name: str = "default") -> dict:
     """
     获取知识库统计信息（同步版本）
-    
-    通过扫描知识库目录中的 parquet 文件数量来估算文本块数量。
-    用于健康检查等不需要加载完整知识库的场景。
-    
+
+    优先用 Chroma 元数据做精确统计:
+      · chunk_count    — 向量库中的文本块总数
+      · document_count — 按 metadata.source 去重后的文档数（v2.4 前恒为 0）
+    Chroma 初始化失败时回退到 parquet 文件数估算（仅 chunk_count）。
+
     Args:
         kb_name: 知识库名称
-    
+
     Returns:
         包含 name, status, chunk_count, document_count 的字典
     """
@@ -438,20 +544,27 @@ def get_kb_stats(kb_name: str = "default") -> dict:
     if not os.path.exists(kb_path) or not os.listdir(kb_path):
         return {"name": kb_name, "status": "empty", "chunk_count": 0, "document_count": 0}
 
-    # ChromaDB 内部使用 parquet 文件存储向量数据，
-    # 通过统计 parquet 文件数量来近似估算 chunk 数量
+    document_count = 0
     try:
-        import glob
-        parquet_files = glob.glob(os.path.join(kb_path, "**", "*.parquet"), recursive=True)
-        chunk_count = len(parquet_files)
-    except Exception:
-        chunk_count = 0
+        deps = get_deps()
+        vs = Chroma(persist_directory=kb_path, embedding_function=deps.embeddings)
+        data = vs.get(include=["metadatas"])
+        chunk_count = len(data["ids"])
+        document_count = len({(m or {}).get("source") for m in data["metadatas"]})
+    except Exception as e:
+        logger.warning(f"精确统计知识库 [{kb_name}] 失败，回退 parquet 估算: {e}")
+        try:
+            import glob
+            parquet_files = glob.glob(os.path.join(kb_path, "**", "*.parquet"), recursive=True)
+            chunk_count = len(parquet_files)
+        except Exception:
+            chunk_count = 0
 
     return {
         "name": kb_name,
         "status": "active" if chunk_count > 0 else "empty",
         "chunk_count": chunk_count,
-        "document_count": 0,
+        "document_count": document_count,
     }
 
 
