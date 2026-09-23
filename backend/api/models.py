@@ -21,7 +21,8 @@ from typing import List, Optional, Literal
 # Pydantic 核心组件：
 #   - BaseModel: 所有数据模型的基类，提供自动数据验证、序列化/反序列化
 #   - Field: 用于对字段进行更精细的约束（如最小长度、取值范围）和描述
-from pydantic import BaseModel, Field
+#   - field_validator: 自定义字段校验器（可抛出业务语义的中文错误信息）
+from pydantic import BaseModel, Field, field_validator
 
 
 # ─────────────────── 对话相关模型 ───────────────────
@@ -303,16 +304,16 @@ class RegisterRequest(BaseModel):
     用户注册请求模型
 
     安全约束:
-        - 用户名: 3~32 位，仅允许字母 / 数字 / 下划线 / 中文
+        - 用户名: 3~32 位，允许字母 / 数字 / 下划线 / 中文 / @ . -
+          （支持直接使用邮箱作为用户名，如 230771578@qq.com）
         - 密码: 6~64 位（bcrypt 哈希后存储，长度下限防止弱口令）
     """
-    # 用户名正则: ^[a-zA-Z0-9_\u4e00-\u9fa5]+$
+    # 用户名正则: 允许邮箱格式（@ . -）与常规用户名字符
     username: str = Field(
         ...,
         min_length=3,
         max_length=32,
-        pattern=r"^[a-zA-Z0-9_\u4e00-\u9fa5]+$",
-        description="用户名（字母/数字/下划线/中文，3-32 位）",
+        description="用户名（3-32 位，支持中文/字母/数字/邮箱格式）",
     )
     # 密码明文仅在 HTTPS 传输与内存中短暂存在，落库前即被 bcrypt 哈希
     password: str = Field(..., min_length=6, max_length=64, description="密码（至少 6 位）")
@@ -320,14 +321,36 @@ class RegisterRequest(BaseModel):
     email: Optional[str] = Field(
         default=None,
         max_length=128,
-        pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$",
         description="邮箱（可选）",
     )
 
+    @field_validator("username")
+    @classmethod
+    def validate_username(cls, v: str) -> str:
+        """
+        用户名字符集校验（中文报错信息，前端可直接展示）。
+
+        允许: 字母 / 数字 / 下划线 / 中文 / @ . -（兼容邮箱格式用户名）
+        禁止: 空格与其它特殊符号（防止注入类字符混入）
+        """
+        import re
+        if not re.fullmatch(r"[a-zA-Z0-9_\u4e00-\u9fa5@.\-]+", v):
+            raise ValueError("用户名仅支持中文、字母、数字、下划线及 @ . - 符号")
+        return v
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, v: Optional[str]) -> Optional[str]:
+        """邮箱宽松格式校验（空值跳过）"""
+        import re
+        if v is not None and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", v):
+            raise ValueError("邮箱格式不正确")
+        return v
+
 
 class LoginRequest(BaseModel):
-    """用户登录请求模型"""
-    username: str = Field(..., min_length=1, max_length=32, description="用户名")
+    """用户登录请求模型（用户名上限放宽至 64，兼容邮箱格式登录名）"""
+    username: str = Field(..., min_length=1, max_length=64, description="用户名")
     password: str = Field(..., min_length=1, max_length=64, description="密码")
 
 

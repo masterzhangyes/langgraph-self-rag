@@ -128,8 +128,22 @@ class TestRegisterValidation:
         assert req.username == "alice"
         assert req.email == "a@b.com"
 
+    def test_email_as_username_accepted(self):
+        """邮箱格式用户名可以直接注册（如 230771578@qq.com）"""
+        from api.models import RegisterRequest
+        req = RegisterRequest(username="230771578@qq.com", password="123456")
+        assert req.username == "230771578@qq.com"
+
     def test_bad_email_rejected(self):
         from api.models import RegisterRequest
         from pydantic import ValidationError
         with pytest.raises(ValidationError):
             RegisterRequest(username="alice", password="123456", email="not-an-email")
+
+    def test_illegal_username_chars_rejected(self):
+        """含空格等非法字符的用户名拒绝，且报中文提示"""
+        from api.models import RegisterRequest
+        from pydantic import ValidationError
+        with pytest.raises(ValidationError) as exc:
+            RegisterRequest(username="bad name!", password="123456")
+        assert "用户名" in str(exc.value)

@@ -49,13 +49,32 @@ export async function apiFetch(path: string, init: RequestInit = {}): Promise<Re
   return res
 }
 
-/** 解析 JSON 响应，失败时抛出后端 detail 信息 */
+/**
+ * 解析 JSON 响应，失败时抛出可读的错误信息。
+ *
+ * 兼容三种后端 detail 形态:
+ *   · 字符串          → 直接展示（业务错误，如「用户名已被占用」）
+ *   · 校验错误数组(422) → 提取 pydantic 校验消息（去掉 "Value error," 前缀）
+ *   · 其它             → 退化为「请求失败 (状态码)」
+ */
 export async function apiJson<T = any>(path: string, init: RequestInit = {}): Promise<T> {
   const res = await apiFetch(path, init)
   const data = await res.json().catch(() => ({}))
   if (!res.ok) {
-    const detail = (data as any)?.detail
-    throw new Error(typeof detail === 'string' ? detail : `请求失败 (${res.status})`)
+    throw new Error(extractErrorMessage(data, res.status))
   }
   return data as T
+}
+
+function extractErrorMessage(data: any, status: number): string {
+  const detail = data?.detail
+  if (typeof detail === 'string') return detail
+  if (Array.isArray(detail) && detail.length > 0) {
+    // pydantic 422: [{loc: [...], msg: "Value error, xxx"}, ...]
+    const msgs = detail
+      .map((d: any) => String(d?.msg || '').replace(/^Value error,\s*/, ''))
+      .filter(Boolean)
+    if (msgs.length > 0) return msgs[0]
+  }
+  return `请求失败 (${status})`
 }

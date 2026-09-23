@@ -27,7 +27,7 @@ export default function LoginPage({ onLogin, onRegister, darkMode, onToggleDark 
       if (busy) return
       setError('')
       if (isRegister) {
-        if (username.trim().length < 3) return setError('用户名至少 3 个字符（字母/数字/下划线/中文）')
+        if (username.trim().length < 3) return setError('用户名至少 3 个字符（支持中文、字母、数字、邮箱格式）')
         if (password.length < 6) return setError('密码至少 6 位')
       }
       setBusy(true)
@@ -85,7 +85,7 @@ export default function LoginPage({ onLogin, onRegister, darkMode, onToggleDark 
             <UserIcon size={15} className="login-field-icon" />
             <input
               type="text"
-              placeholder="用户名"
+              placeholder="用户名（支持邮箱格式）"
               value={username}
               onChange={e => setUsername(e.target.value)}
               autoComplete="username"
