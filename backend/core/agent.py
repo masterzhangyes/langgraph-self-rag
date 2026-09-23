@@ -436,7 +436,8 @@ class SelfRAGAgent:
         max_retries = settings.MAX_RETRIEVAL_RETRIES
 
         # 无文档时跳过重试，直接进入生成（生成时会处理无文档的情况）
-        if not scores:
+        # 兼容 list / ndarray / None：统一转 list 判长度
+        if scores is None or len(scores) == 0:
             return "generate"
 
         # 计算相关文档占比（所有评分的平均值）

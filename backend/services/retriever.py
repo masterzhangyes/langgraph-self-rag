@@ -84,7 +84,9 @@ class HybridRetriever:
 
         k = k or self._dense_k
         tokenized_query = self._tokenize(query)
-        scores = self.bm25.get_scores(tokenized_query)
+        # ⚠️ BM25Okapi.get_scores() 返回 ndarray，否则 if scores 会触发
+        #   "The truth value of an array with more than one element is ambiguous"
+        scores = self.bm25.get_scores(tokenized_query).tolist()
 
         # 归一化到 [0, 1]
         max_score = max(scores) if scores else 1.0
