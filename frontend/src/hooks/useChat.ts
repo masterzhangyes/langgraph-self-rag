@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
+import { apiFetch } from '../api'
 
 const API_BASE = '/api'
 
@@ -46,7 +47,7 @@ export function useChat() {
 
   const fetchSessions = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/sessions`)
+      const res = await apiFetch(`${API_BASE}/sessions`)
       if (!res.ok) return
       const data = await res.json()
       setSessions(data.sessions || [])
@@ -57,7 +58,7 @@ export function useChat() {
 
   const loadSession = useCallback(async (sessionId: string) => {
     try {
-      const res = await fetch(`${API_BASE}/sessions/${sessionId}`)
+      const res = await apiFetch(`${API_BASE}/sessions/${sessionId}`)
       if (!res.ok) return
       const data = await res.json()
       const msgs: ChatMessage[] = (data.messages || [])
@@ -91,7 +92,7 @@ export function useChat() {
   const deleteSession = useCallback(
     async (sessionId: string) => {
       try {
-        const res = await fetch(`${API_BASE}/sessions/${sessionId}`, { method: 'DELETE' })
+        const res = await apiFetch(`${API_BASE}/sessions/${sessionId}`, { method: 'DELETE' })
         if (!res.ok) return false
         setSessions(prev => prev.filter(s => s.id !== sessionId))
         if (activeSession === sessionId) {
@@ -125,7 +126,7 @@ export function useChat() {
    */
   const attachLatestSources = useCallback(async (sessionId: string) => {
     try {
-      const res = await fetch(`${API_BASE}/sessions/${sessionId}`)
+      const res = await apiFetch(`${API_BASE}/sessions/${sessionId}`)
       if (!res.ok) return
       const data = await res.json()
       const lastAssistant = [...(data.messages || [])]
@@ -179,7 +180,7 @@ export function useChat() {
         .map(m => ({ role: m.role, content: m.content }))
 
       try {
-        const res = await fetch(`${API_BASE}/chat/stream`, {
+        const res = await apiFetch(`${API_BASE}/chat/stream`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({

@@ -80,6 +80,10 @@ from api.middleware import (
     setup_logging,               # 日志初始化（控制台 + 文件）
 )
 
+# 用户认证（JWT 双令牌）与管理后台路由
+from api.auth import router as auth_router, get_optional_user
+from api.admin import router as admin_router
+
 # 依赖注入容器
 from infrastructure.dependencies import get_deps, RAGDependencies
 
@@ -159,7 +163,7 @@ async def lifespan(app: FastAPI):
     1. 调用 _close_pool() 关闭数据库连接池，释放文件句柄
     """
     # ── 启动日志 ──
-    logger.info(f"智能问答系统 v2.1 启动中...")
+    logger.info(f"智能问答系统 v2.2 启动中...")
     logger.info(f"模型: {settings.LLM_MODEL}")
     logger.info(f"混合检索: {'启用' if settings.ENABLE_HYBRID_RETRIEVAL else '禁用'}")
     logger.info(f"重排序: {'启用' if settings.ENABLE_RERANKING else '禁用'}")
@@ -187,10 +191,16 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="智能问答系统",
-    version="2.1.0",
-    description="基于 LangChain RAG 的企业级智能问答系统",
+    version="2.2.0",
+    description="基于 LangChain RAG 的企业级智能问答系统（含用户认证与管理后台）",
     lifespan=lifespan,
 )
+
+# ── 挂载认证与管理后台路由 ──
+# /api/auth/*   注册 / 登录 / 刷新令牌 / 当前用户 / 登出
+# /api/admin/*  用户管理 / 运营统计 / 会话审计 / 操作日志（RBAC 守卫）
+app.include_router(auth_router)
+app.include_router(admin_router)
 
 # 速率限制: 将 limiter 挂载到 app.state，并注册 429 异常处理器
 if _HAS_RATE_LIMIT:
@@ -268,91 +278,73 @@ async def validation_handler(request: Request, exc: ValidationError):
 
 
 @app.get("/api/sessions")
-async def list_sessions():
+async def list_sessions(user: dict = Depends(get_optional_user)):
     """
-    获取所有会话列表。
+    获取当前用户的会话列表。
 
-    GET /api/sessions
+    GET /api/sessions  （Authorization: Bearer <token>）
 
-    返回:
-        {
-            "sessions": [
-                {"id": "uuid", "title": "关于...", "created_at": "...", "updated_at": "..."},
-                ...
-            ]
-        }
+    隔离规则:
+        · 登录用户 → 只返回该用户的会话（按 user_id 过滤）
+        · 未登录   → 返回匿名会话桶（user_id IS NULL，向后兼容旧客户端）
     """
     from infrastructure.database import get_sessions
-    return {"sessions": await get_sessions()}
+    user_id = user["id"] if user else None
+    return {"sessions": await get_sessions(user_id=user_id)}
 
 
 @app.post("/api/sessions")
-async def new_session():
+async def new_session(user: dict = Depends(get_optional_user)):
     """
-    创建新会话。
+    创建新会话（归属于当前登录用户）。
 
     POST /api/sessions  （无请求体）
-
-    返回:
-        {"id": "uuid", "title": "新对话", "created_at": "..."}
-
-    说明:
-        会话默认标题为"新对话"，可在后续对话中通过首条用户消息自动更新。
     """
     from infrastructure.database import create_session
-    return await create_session()
+    return await create_session(user_id=user["id"] if user else None)
 
 
 @app.get("/api/sessions/{session_id}")
-async def get_session_detail(session_id: str):
+async def get_session_detail(session_id: str, user: dict = Depends(get_optional_user)):
     """
-    获取会话详情（含完整历史消息）。
-
-    GET /api/sessions/{session_id}
-
-    返回:
-        {
-            "id": "uuid",
-            "title": "...",
-            "created_at": "...",
-            "updated_at": "...",
-            "messages": [
-                {"id": ..., "role": "user", "content": "你好", "created_at": "..."},
-                {"id": ..., "role": "assistant", "content": "你好！...", "created_at": "..."},
-            ]
-        }
+    获取会话详情（含完整历史消息）— 仅限会话归属者访问。
 
     错误:
-        404 → 会话不存在
+        404 → 会话不存在或不属于当前用户（不泄露他人会话的存在性）
     """
     from infrastructure.database import get_session, get_messages
 
     # 先查会话基本信息
     session = await get_session(session_id)
-    if not session:
+    owner_id = session.get("user_id") if session else None
+
+    # 越权防护: 会话属于某用户时，只有本人能读取
+    if not session or (owner_id is not None and (not user or user["id"] != owner_id)):
         raise HTTPException(status_code=404, detail="会话不存在")
 
     # 再查该会话的所有消息，合并返回
     messages = await get_messages(session_id)
+    session.pop("user_id", None)  # 内部字段不出参
     session["messages"] = messages
     return session
 
 
 @app.delete("/api/sessions/{session_id}")
-async def remove_session(session_id: str):
+async def remove_session(session_id: str, user: dict = Depends(get_optional_user)):
     """
-    删除会话（级联删除所有关联消息）。
-
-    DELETE /api/sessions/{session_id}
-
-    返回:
-        {"message": "会话已删除"}
+    删除会话（级联删除所有关联消息）— 仅限会话归属者。
 
     说明:
         SQLite 表设置了 FOREIGN KEY ... ON DELETE CASCADE，
         删除会话时 messages 表中关联记录自动清除。
     """
-    from infrastructure.database import delete_session
+    from infrastructure.database import get_session, delete_session
+
+    session = await get_session(session_id)
+    owner_id = session.get("user_id") if session else None
+    if not session or (owner_id is not None and (not user or user["id"] != owner_id)):
+        raise HTTPException(status_code=404, detail="会话不存在")
+
     await delete_session(session_id)
     return {"message": "会话已删除"}
 
@@ -367,7 +359,7 @@ async def remove_session(session_id: str):
 
 
 @app.post("/api/chat", response_model=ChatResponse)
-async def api_chat(req: ChatRequest):
+async def api_chat(req: ChatRequest, user: dict = Depends(get_optional_user)):
     """
     非流式对话 — 一次返回完整答案 + 引用来源。
 
@@ -403,10 +395,10 @@ async def api_chat(req: ChatRequest):
         from core.rag_chain import chat
         from infrastructure.database import create_session
 
-        # 自动创建会话（如果未指定）
+        # 自动创建会话（如果未指定）— 归属当前登录用户
         session_id = req.session_id
         if not session_id:
-            session_id = (await create_session())["id"]
+            session_id = (await create_session(user_id=user["id"] if user else None))["id"]
 
         # 调用 RAG 对话引擎
         result = await chat(
@@ -430,7 +422,7 @@ async def api_chat(req: ChatRequest):
 
 
 @app.post("/api/chat/stream")
-async def api_chat_stream(req: ChatRequest):
+async def api_chat_stream(req: ChatRequest, user: dict = Depends(get_optional_user)):
     """
     流式对话 — SSE (Server-Sent Events) 逐 token 推送。
 
@@ -459,7 +451,7 @@ async def api_chat_stream(req: ChatRequest):
     # 自动创建会话
     session_id = req.session_id
     if not session_id:
-        session_id = (await create_session())["id"]
+        session_id = (await create_session(user_id=user["id"] if user else None))["id"]
 
     async def event_generator():
         """
@@ -847,7 +839,7 @@ async def health():
     # ── 基础信息 ──
     checks = {
         "status": "ok",
-        "version": "2.1.0",
+        "version": "2.2.0",
         "model": settings.LLM_MODEL,
         "kb_count": len(get_all_kb_stats()),
         "features": {

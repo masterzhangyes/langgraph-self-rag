@@ -11,6 +11,7 @@ import {
   X,
 } from 'lucide-react'
 import { useToast } from './Toast'
+import { apiFetch } from '../api'
 
 const API_BASE = '/api'
 
@@ -62,7 +63,7 @@ export default function KBPanel({
       const formData = new FormData()
       for (const f of Array.from(files)) formData.append('files', f)
       formData.append('kb_name', targetKb)
-      const res = await fetch(`${API_BASE}/kb/upload`, {
+      const res = await apiFetch(`${API_BASE}/kb/upload`, {
         method: 'POST',
         body: formData,
       })
@@ -93,7 +94,7 @@ export default function KBPanel({
     if (!url) return
     setBusy(true)
     try {
-      const res = await fetch(`${API_BASE}/kb/load-web`, {
+      const res = await apiFetch(`${API_BASE}/kb/load-web`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ urls: [url], kb_name: targetKb }),
@@ -132,7 +133,7 @@ export default function KBPanel({
     }
     setClearConfirm(false)
     try {
-      const res = await fetch(`${API_BASE}/kb/${targetKb}/clear`, { method: 'DELETE' })
+      const res = await apiFetch(`${API_BASE}/kb/${targetKb}/clear`, { method: 'DELETE' })
       if (!res.ok) throw new Error((await res.json()).detail || '清空失败')
       const remaining = kbList.filter(k => k.name !== targetKb)
       if (remaining.length > 0) setActiveKb(remaining[0].name)

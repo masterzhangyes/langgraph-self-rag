@@ -94,12 +94,27 @@ async def init_db():
     conn = await aiosqlite.connect(get_db_path())
     try:
         await conn.executescript("""
-            -- 会话表
+            -- 用户表（v2.2 新增）
+            -- 密码只存 bcrypt 哈希，绝不存明文；
+            -- role 实现两级 RBAC（user / admin）
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                email TEXT,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'user' CHECK(role IN ('user', 'admin')),
+                is_active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                last_login_at TEXT
+            );
+
+            -- 会话表（user_id 归属用户，NULL 表示匿名会话）
             CREATE TABLE IF NOT EXISTS chat_sessions (
                 id TEXT PRIMARY KEY,
                 title TEXT DEFAULT '新对话',
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE
             );
 
             -- 消息表
@@ -113,12 +128,44 @@ async def init_db():
                 FOREIGN KEY (session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE
             );
 
+            -- 审计日志表（v2.2 新增）
+            -- 记录登录 / 注册 / 管理员操作，供管理后台回溯
+            CREATE TABLE IF NOT EXISTS audit_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                username TEXT,
+                action TEXT NOT NULL,
+                detail TEXT,
+                ip TEXT,
+                created_at TEXT NOT NULL
+            );
+
             -- 索引
             CREATE INDEX IF NOT EXISTS idx_messages_session 
                 ON chat_messages(session_id, id);
             CREATE INDEX IF NOT EXISTS idx_sessions_updated 
                 ON chat_sessions(updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_audit_created 
+                ON audit_logs(created_at DESC);
         """)
+        await conn.commit()
+
+        # ── 幂等迁移：为旧库的 chat_sessions 补充 user_id 归属列 ──
+        # 旧数据 user_id 为 NULL → 归入「匿名会话」桶，不破坏向后兼容
+        cursor = await conn.execute("PRAGMA table_info(chat_sessions)")
+        columns = [row[1] for row in await cursor.fetchall()]
+        if "user_id" not in columns:
+            await conn.execute(
+                "ALTER TABLE chat_sessions ADD COLUMN user_id INTEGER "
+                "REFERENCES users(id) ON DELETE CASCADE"
+            )
+            await conn.commit()
+
+        # 会话归属索引（迁移完成后创建，保证旧库也能建上）
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_user "
+            "ON chat_sessions(user_id, updated_at DESC)"
+        )
         await conn.commit()
     finally:
         await conn.close()
@@ -126,16 +173,16 @@ async def init_db():
 
 # ──────── 会话操作 ────────
 
-async def create_session(title: str = "新对话") -> dict:
-    """创建新会话"""
+async def create_session(title: str = "新对话", user_id: Optional[int] = None) -> dict:
+    """创建新会话（user_id 为 None 时归入匿名会话桶）"""
     session_id = uuid.uuid4().hex[:16]
     now = datetime.now().isoformat()
 
     conn = await _get_conn()
     try:
         await conn.execute(
-            "INSERT INTO chat_sessions (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
-            (session_id, title, now, now),
+            "INSERT INTO chat_sessions (id, title, created_at, updated_at, user_id) VALUES (?, ?, ?, ?, ?)",
+            (session_id, title, now, now, user_id),
         )
         await conn.commit()
     finally:
@@ -143,16 +190,23 @@ async def create_session(title: str = "新对话") -> dict:
     return {"id": session_id, "title": title, "created_at": now, "updated_at": now}
 
 
-async def get_sessions(limit: int = 50) -> List[dict]:
-    """获取会话列表"""
+async def get_sessions(limit: int = 50, user_id: Optional[int] = None) -> List[dict]:
+    """
+    获取会话列表（按用户隔离）。
+
+    · user_id 为具体值 → 只返回该用户的会话
+    · user_id 为 None  → 只返回匿名会话（向后兼容未登录的旧客户端）
+    · 管理端查看全部会话请使用 user_store.get_all_sessions_with_user()
+    """
     conn = await _get_conn()
     try:
         cursor = await conn.execute(
             """SELECT s.*, 
                (SELECT COUNT(*) FROM chat_messages WHERE session_id = s.id) as message_count
                FROM chat_sessions s 
+               WHERE s.user_id IS ?
                ORDER BY s.updated_at DESC LIMIT ?""",
-            (limit,),
+            (user_id, limit),
         )
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]

@@ -1,4 +1,5 @@
-import { Menu, Library, Plus, Sparkles, Trash2, Settings } from 'lucide-react'
+import { Menu, Library, Plus, Sparkles, Trash2, Settings, LogOut, ShieldCheck, UserCircle2 } from 'lucide-react'
+import type { User } from '../hooks/useAuth'
 
 interface KBInfo {
   status: string
@@ -11,22 +12,28 @@ interface TopBarProps {
   currentKb: KBInfo
   activeKb: string
   activeSession: string | null
+  user: User
   onToggleSessions: () => void
   onToggleKB: () => void
   onToggleSettings: () => void
+  onToggleAdmin: () => void
   onNewSession: () => void
   onDeleteSession: () => void
+  onLogout: () => void
 }
 
 export default function TopBar({
   currentKb,
   activeKb,
   activeSession,
+  user,
   onToggleSessions,
   onToggleKB,
   onToggleSettings,
+  onToggleAdmin,
   onNewSession,
   onDeleteSession,
+  onLogout,
 }: TopBarProps) {
   const kbReady = currentKb.status === 'active' || (currentKb.chunk_count ?? 0) > 0
 
@@ -70,6 +77,19 @@ export default function TopBar({
             删除对话
           </button>
         )}
+        {user.role === 'admin' && (
+          <button className="btn-admin" onClick={onToggleAdmin} title="管理后台">
+            <ShieldCheck size={14} />
+            管理
+          </button>
+        )}
+        <span className="user-chip" title={user.email || user.username}>
+          <UserCircle2 size={15} />
+          {user.username}
+        </span>
+        <button className="btn-icon" onClick={onLogout} title="退出登录" aria-label="退出登录">
+          <LogOut size={18} />
+        </button>
         <button className="btn-icon" onClick={onToggleSettings} title="设置" aria-label="设置">
           <Settings size={19} />
         </button>

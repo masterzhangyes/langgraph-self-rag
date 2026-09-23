@@ -295,6 +295,85 @@ class EvaluationResponse(BaseModel):
     avg_latency_ms: float = 0
 
 
+# ─────────────────── 用户认证模型 ───────────────────
+# 用户注册 / 登录 / JWT 令牌 / 管理员用户更新等认证体系数据模型。
+
+class RegisterRequest(BaseModel):
+    """
+    用户注册请求模型
+
+    安全约束:
+        - 用户名: 3~32 位，仅允许字母 / 数字 / 下划线 / 中文
+        - 密码: 6~64 位（bcrypt 哈希后存储，长度下限防止弱口令）
+    """
+    # 用户名正则: ^[a-zA-Z0-9_\u4e00-\u9fa5]+$
+    username: str = Field(
+        ...,
+        min_length=3,
+        max_length=32,
+        pattern=r"^[a-zA-Z0-9_\u4e00-\u9fa5]+$",
+        description="用户名（字母/数字/下划线/中文，3-32 位）",
+    )
+    # 密码明文仅在 HTTPS 传输与内存中短暂存在，落库前即被 bcrypt 哈希
+    password: str = Field(..., min_length=6, max_length=64, description="密码（至少 6 位）")
+    # 邮箱为可选项，做宽松格式校验（不引入额外依赖）
+    email: Optional[str] = Field(
+        default=None,
+        max_length=128,
+        pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$",
+        description="邮箱（可选）",
+    )
+
+
+class LoginRequest(BaseModel):
+    """用户登录请求模型"""
+    username: str = Field(..., min_length=1, max_length=32, description="用户名")
+    password: str = Field(..., min_length=1, max_length=64, description="密码")
+
+
+class RefreshRequest(BaseModel):
+    """刷新令牌请求模型 — 用 refresh_token 换取新的双令牌"""
+    refresh_token: str = Field(..., description="刷新令牌")
+
+
+class UserResponse(BaseModel):
+    """
+    用户信息响应模型（脱敏）
+
+    永远不包含 password_hash，避免敏感信息泄露。
+    """
+    id: int
+    username: str
+    email: Optional[str] = None
+    role: Literal["user", "admin"] = "user"
+    is_active: bool = True
+    created_at: str
+    last_login_at: Optional[str] = None
+
+
+class TokenResponse(BaseModel):
+    """
+    双令牌响应模型
+
+    · access_token:  短期令牌（默认 30 分钟），随每个请求的
+                     Authorization: Bearer <token> 头发送
+    · refresh_token: 长期令牌（默认 7 天），仅在 /api/auth/refresh 使用
+    """
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+    # access token 有效期（秒），前端据此实现到期前静默刷新
+    expires_in: int
+    user: UserResponse
+
+
+class AdminUserUpdate(BaseModel):
+    """管理员更新用户请求模型（角色 / 启停 / 重置密码均可选）"""
+    role: Optional[Literal["user", "admin"]] = None
+    is_active: Optional[bool] = None
+    password: Optional[str] = Field(default=None, min_length=6, max_length=64)
+
+
 # ─────────────────── 通用模型 ───────────────────
 # 公共的基础模型，适用于所有 API 接口的通用响应结构。
 

@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import './App.css'
 
 import { useChat } from './hooks/useChat'
+import { useAuth } from './hooks/useAuth'
 import { ToastProvider } from './components/Toast'
 import Sidebar from './components/Sidebar'
 import KBPanel from './components/KBPanel'
@@ -9,11 +10,16 @@ import SettingsPanel from './components/SettingsPanel'
 import TopBar from './components/TopBar'
 import ChatArea from './components/ChatArea'
 import InputArea from './components/InputArea'
+import LoginPage from './components/LoginPage'
+import AdminPanel from './components/AdminPanel'
+import { apiFetch, UNAUTHORIZED_EVENT } from './api'
 import type { KBItem } from './components/KBPanel'
 
 const API_BASE = '/api'
 
 function App() {
+  const { user, authLoading, login, register, logout } = useAuth()
+
   const {
     messages, loading, activeSession, sessions,
     fetchSessions, loadSession, newSession, deleteSession,
@@ -25,6 +31,7 @@ function App() {
   const [showKbPanel, setShowKbPanel] = useState(false)
   const [showSessionPanel, setShowSessionPanel] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
+  const [showAdmin, setShowAdmin] = useState(false)
 
   // ── 偏好持久化：暗色 / 温度 / 知识库 ──
   const [darkMode, setDarkMode] = useState(() => localStorage.getItem('qa.dark') === '1')
@@ -51,7 +58,8 @@ function App() {
 
   const fetchKBList = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/kb/list`)
+      const res = await apiFetch(`${API_BASE}/kb/list`)
+      if (!res.ok) return
       const data = await res.json()
       const filtered = (data.knowledge_bases || []).filter((k: KBItem) => k.name !== 'db')
       setKbList(filtered)
@@ -66,10 +74,23 @@ function App() {
     }
   }, [kbList, activeKb])
 
+  // 登录后才拉取业务数据；令牌失效时强制登出
   useEffect(() => {
-    fetchSessions()
-    fetchKBList()
-  }, [fetchSessions, fetchKBList])
+    if (user) {
+      fetchSessions()
+      fetchKBList()
+    }
+  }, [user, fetchSessions, fetchKBList])
+
+  useEffect(() => {
+    const onUnauthorized = () => {
+      // 令牌失效：回到登录页（useAuth 内 /me 失败会清空 user）
+      setShowAdmin(false)
+      closeAllPanels()
+    }
+    window.addEventListener(UNAUTHORIZED_EVENT, onUnauthorized)
+    return () => window.removeEventListener(UNAUTHORIZED_EVENT, onUnauthorized)
+  }, [])
 
   const closeAllPanels = useCallback(() => {
     setShowSessionPanel(false)
@@ -80,7 +101,7 @@ function App() {
   // Esc 关闭面板
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') closeAllPanels()
+      if (e.key === 'Escape') { closeAllPanels(); setShowAdmin(false) }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -103,6 +124,29 @@ function App() {
 
   const currentKb = kbList.find(k => k.name === activeKb) || { status: 'empty', chunk_count: 0, document_count: 0 }
 
+  // ── 启动中：加载登录态 ──
+  if (authLoading) {
+    return (
+      <div className={`app-splash ${darkMode ? 'dark-mode' : ''}`}>
+        <div className="brand-mark"><span>✦</span></div>
+        <p>正在加载…</p>
+      </div>
+    )
+  }
+
+  // ── 未登录：登录 / 注册页 ──
+  if (!user) {
+    return (
+      <LoginPage
+        onLogin={login}
+        onRegister={register}
+        darkMode={darkMode}
+        onToggleDark={() => setDarkMode(d => !d)}
+      />
+    )
+  }
+
+  // ── 已登录：主界面 ──
   return (
     <ToastProvider>
       <div className={`app-container ${darkMode ? 'dark-mode' : ''}`}>
@@ -140,6 +184,15 @@ function App() {
           onClose={() => setShowSettings(false)}
         />
 
+        {/* 管理后台（仅 admin） */}
+        {user.role === 'admin' && (
+          <AdminPanel
+            visible={showAdmin}
+            onClose={() => setShowAdmin(false)}
+            currentUser={user}
+          />
+        )}
+
         {/* 遮罩层：点击关闭所有面板 */}
         {(showSessionPanel || showKbPanel || showSettings) && (
           <div className="overlay" onClick={closeAllPanels} />
@@ -150,6 +203,7 @@ function App() {
             currentKb={currentKb}
             activeKb={activeKb}
             activeSession={activeSession}
+            user={user}
             onToggleSessions={() => {
               if (showSessionPanel) { setShowSessionPanel(false); return }
               closeAllPanels(); setShowSessionPanel(true)
@@ -162,11 +216,16 @@ function App() {
               if (showSettings) { setShowSettings(false); return }
               closeAllPanels(); setShowSettings(true)
             }}
+            onToggleAdmin={() => {
+              if (showAdmin) { setShowAdmin(false); return }
+              closeAllPanels(); setShowAdmin(true)
+            }}
             onNewSession={newSession}
             onDeleteSession={() => {
               if (activeSession) deleteSession(activeSession)
               else newSession()
             }}
+            onLogout={logout}
           />
 
           <ChatArea

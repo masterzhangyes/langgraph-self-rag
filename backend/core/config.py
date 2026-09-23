@@ -208,6 +208,24 @@ class Settings(BaseSettings):
     # 生产环境应限制为具体的前端域名，如 ["http://localhost:5173"]
     ALLOWED_ORIGINS: List[str] = Field(default=["*"], description="允许的跨域来源")
 
+    # ── 用户认证（JWT）配置 ──
+    # 基于 JWT 的双令牌（access + refresh）无状态认证体系。
+    # 密码使用 bcrypt 自适应哈希存储，令牌使用 HS256 对称签名。
+
+    # JWT 签名算法（HS256 为对称签名，适用于单体服务；
+    # 微服务/多方验签场景可切换 RS256 非对称签名）
+    JWT_ALGORITHM: str = Field(default="HS256", description="JWT 签名算法")
+    # 访问令牌有效期（分钟）。
+    # 短有效期的 access token 是业界惯例：即使泄露，攻击窗口也有限
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(default=30, description="访问令牌有效期(分钟)")
+    # 刷新令牌有效期（天）。用于在 access token 过期后换取新令牌，
+    # 免去用户频繁重新登录
+    REFRESH_TOKEN_EXPIRE_DAYS: int = Field(default=7, description="刷新令牌有效期(天)")
+    # 登录接口防爆破：滑动窗口内允许的最大失败次数
+    LOGIN_MAX_ATTEMPTS: int = Field(default=5, description="登录最大失败尝试次数")
+    # 登录失败锁定窗口（秒），超过次数后在该窗口内拒绝该 (IP, 用户名) 的尝试
+    LOGIN_LOCKOUT_SECONDS: int = Field(default=300, description="登录失败锁定时长(秒)")
+
     # ── 支持的文件格式 ──
     # 定义知识库支持上传的文档类型，上传时会校验文件扩展名。
 

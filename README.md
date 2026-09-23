@@ -1,7 +1,8 @@
-# 智能问答系统 v2.1
+# 智能问答系统 v2.2
 
 > 基于 **LangChain RAG** + **LangGraph Agent** 的智能问答平台
 > 默认使用 **智谱清言 `glm-4-flash` 免费模型**（OpenAI 兼容 API，可随时切换其它厂商）
+> v2.2 新增：**JWT 用户认证 + 多用户会话隔离 + 管理后台（RBAC / 审计日志 / 运营统计）**
 <img width="2876" height="1472" alt="fb5dee4b-a661-491e-8691-f2bb221d1bdd" src="https://github.com/user-attachments/assets/353a3138-4500-4268-962d-91ebea2e85bb" />
 <img width="2864" height="1468" alt="8ef9d138-e37f-4586-80ee-787567582728" src="https://github.com/user-attachments/assets/5d40fe2b-d64a-4507-b05c-c038842ab696" />
 
@@ -12,14 +13,47 @@
 | 层 | 技术 |
 |---|---|
 | 后端 | FastAPI + Uvicorn + LangChain/LangGraph |
+| 认证 | JWT 双令牌（PyJWT）+ bcrypt 密码哈希 + RBAC |
 | LLM | 智谱 `glm-4-flash`（免费）/ 任意 OpenAI 兼容 API (DeepSeek、OpenAI、通义等) |
 | 检索 | BM25 稀疏 + Dense 稠密 + RRF 融合 |
 | 重排序 | Cross-Encoder / LLM-based |
 | 向量库 | Chroma (本地持久化) |
 | 嵌入 | 智谱 `embedding-3`（云端）/ BGE 系列（本地） |
-| 对话存储 | SQLite + aiosqlite |
+| 对话存储 | SQLite + aiosqlite（用户 / 会话 / 消息 / 审计日志） |
 | 前端 | React 18 + TypeScript + Vite 5 |
 | 部署 | Docker + docker-compose + Nginx |
+
+## 用户认证与管理后台（v2.2）
+
+### 认证体系
+
+- **注册 / 登录**：`POST /api/auth/register`、`POST /api/auth/login`，成功即返回双令牌
+- **双令牌机制**：access token（默认 30 分钟）+ refresh token（默认 7 天），前端自动静默续期
+- **密码安全**：bcrypt 自适应哈希（随机盐 + cost=12），数据库不存明文
+- **防爆破**：同一 (IP, 用户名) 连续登录失败超过阈值（默认 5 次）临时锁定（默认 5 分钟）
+- **引导约定**：**首个注册的用户自动成为管理员**，之后注册的均为普通用户
+- **会话隔离**：每个用户的对话会话按 `user_id` 隔离，互相不可见；未携带令牌的请求落入匿名桶（兼容旧客户端 / 脚本调用）
+
+### 管理后台（仅 admin 可见）
+
+前端右上角「管理」按钮进入，或直接调用 `/api/admin/*`：
+
+- **运营概览**：用户总数 / 今日新增 / 会话总数 / 消息总数 / 今日活跃 / 知识库规模
+- **用户管理**：角色提升/降级、启用/禁用、重置密码、删除用户（级联删除其会话）
+- **会话审计**：查看全部用户会话（含归属），支持删除
+- **操作日志**：登录 / 注册 / 登录失败 / 管理操作全量审计（含 IP）
+
+### 安全设计要点
+
+| 风险 | 对策 |
+|---|---|
+| 密码泄露 | bcrypt 哈希存储，脱敏响应模型（永不出参 password_hash） |
+| 令牌泄露 | access token 短有效期；禁用用户令牌即刻失效 |
+| 暴力破解 | (IP, 用户名) 滑动窗口限流 + 锁定 |
+| 越权访问（IDOR） | 会话读取/删除校验归属，他人会话返回 404（不泄露存在性） |
+| 管理员自锁 | 禁止禁用/删除自己；禁止降级最后一个活跃管理员 |
+| 撞库探测 | 用户不存在与密码错误返回统一提示 |
+| 操作抵赖 | 全量审计日志（操作者 / 目标 / IP / 时间） |
 
 ## 项目结构
 
@@ -45,8 +79,10 @@
 │   ├── chroma_default/        # Chroma 向量库（目录名由 .env: VECTOR_DB_PATH 指定）
 │   │
 │   ├── api/                   # 表示层
-│   │   ├── models.py          # 请求/响应 Pydantic 模型
-│   │   └── middleware.py      # 请求日志、API 认证、异常处理
+│   │   ├── models.py          # 请求/响应 Pydantic 模型（含认证模型）
+│   │   ├── middleware.py      # 请求日志、API 认证、异常处理
+│   │   ├── auth.py            # JWT 双令牌认证（注册/登录/刷新/RBAC 依赖/防爆破）
+│   │   └── admin.py           # 管理后台路由（用户/统计/会话审计/日志）
 │   │
 │   ├── core/                  # 核心引擎
 │   │   ├── config.py          # Pydantic Settings 统一配置（含安全校验）
@@ -59,11 +95,13 @@
 │   │   └── evaluation.py      # RAG 质量评估 (3 指标)
 │   │
 │   ├── infrastructure/        # 基础设施
-│   │   ├── database.py        # SQLite 会话持久化
+│   │   ├── database.py        # SQLite 会话持久化（含 v2.2 幂等迁移）
+│   │   ├── user_store.py      # 用户 / 审计日志 / 管理统计数据层
 │   │   └── dependencies.py    # 依赖注入容器
 │   │
 │   └── tests/                 # 单元测试（conftest 自动 mock，无需真实 Key）
 │       ├── conftest.py
+│       ├── test_auth.py       # 密码哈希 / JWT / 防爆破 / 注册校验
 │       ├── test_retriever.py
 │       ├── test_reranker.py
 │       └── test_evaluation.py
@@ -78,18 +116,22 @@
     ├── Dockerfile
     └── src/
         ├── main.tsx           # React 入口
-        ├── App.tsx            # 根组件 & 全局状态
+        ├── App.tsx            # 根组件 & 全局状态（登录态门卫）
+        ├── api.ts             # 统一请求封装（自动附带 Bearer 令牌 / 401 处理）
         ├── App.css            # 双主题样式系统
         ├── index.css          # 全局重置与字体
         ├── components/
+        │   ├── LoginPage.tsx  # 登录 / 注册页
+        │   ├── AdminPanel.tsx # 管理后台（统计/用户/会话审计/日志）
         │   ├── ChatArea.tsx   # 对话消息区
         │   ├── InputArea.tsx  # 输入框
         │   ├── KBPanel.tsx    # 知识库管理面板
         │   ├── SettingsPanel.tsx # 设置面板
         │   ├── Sidebar.tsx    # 会话历史
-        │   ├── TopBar.tsx     # 顶栏
+        │   ├── TopBar.tsx     # 顶栏（用户信息 / 管理入口 / 登出）
         │   └── Toast.tsx      # 通知系统
         └── hooks/
+            ├── useAuth.ts     # 认证 Hook（登录态恢复 / 静默刷新）
             └── useChat.ts     # SSE 流式对话 Hook
 ```
 
@@ -194,14 +236,40 @@ LLM_MODEL=qwen2.5:7b
 
 ## API 概览
 
+### 认证（v2.2）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `POST` | `/api/auth/register` | 注册（首个用户自动成为 admin） |
+| `POST` | `/api/auth/login` | 登录（返回双令牌） |
+| `POST` | `/api/auth/refresh` | 刷新令牌 |
+| `GET` | `/api/auth/me` | 当前用户信息 |
+| `POST` | `/api/auth/logout` | 退出登录 |
+
+> 认证后的请求须携带 `Authorization: Bearer <access_token>`。
+
+### 管理后台（v2.2，仅 admin）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/api/admin/stats` | 运营统计（用户/会话/消息/今日活跃/知识库） |
+| `GET` | `/api/admin/users` | 用户列表 |
+| `PATCH` | `/api/admin/users/{id}` | 更新用户（角色/启停/重置密码） |
+| `DELETE` | `/api/admin/users/{id}` | 删除用户（级联删除会话） |
+| `GET` | `/api/admin/sessions` | 全量会话列表（含归属用户） |
+| `DELETE` | `/api/admin/sessions/{id}` | 删除任意会话 |
+| `GET` | `/api/admin/audit-logs` | 审计日志 |
+
+### 业务
+
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | `POST` | `/api/chat` | 非流式对话 |
 | `POST` | `/api/chat/stream` | SSE 流式对话 |
-| `GET` | `/api/sessions` | 会话列表 |
+| `GET` | `/api/sessions` | 当前用户会话列表 |
 | `POST` | `/api/sessions` | 新建会话 |
-| `GET` | `/api/sessions/{id}` | 会话详情 |
-| `DELETE` | `/api/sessions/{id}` | 删除会话 |
+| `GET` | `/api/sessions/{id}` | 会话详情（仅归属者） |
+| `DELETE` | `/api/sessions/{id}` | 删除会话（仅归属者） |
 | `GET` | `/api/kb/list` | 知识库列表 |
 | `GET` | `/api/kb/stats` | 全部知识库统计 |
 | `GET` | `/api/kb/{name}/stats` | 指定知识库统计 |
@@ -214,6 +282,10 @@ LLM_MODEL=qwen2.5:7b
 
 ## 核心特性
 
+- **用户认证**: JWT 双令牌（access + refresh）+ bcrypt 密码哈希 + 登录防爆破
+- **RBAC 权限**: user / admin 两级角色，管理后台全端点守卫
+- **多用户会话隔离**: 会话按 `user_id` 隔离，支持越权防护（IDOR）与匿名兼容
+- **管理后台**: 运营统计 / 用户管理 / 会话审计 / 操作日志
 - **混合检索**: BM25 (jieba 中文分词) + Dense Embedding + RRF 融合
 - **重排序**: BGE-Reranker Cross-Encoder 精排 / LLM 打分（默认关闭，`.env` 设 `ENABLE_RERANKING=true` 开启）
 - **Self-RAG Agent**: LangGraph 6 节点状态图（查询扩展→检索→相关性评估→生成→幻觉检测，默认开启）
@@ -235,6 +307,9 @@ pytest            # 等价于 pytest tests/ -v（由 pytest.ini 指定目录与�
 
 ## 常见问题
 
+- **忘记管理员密码 / 想重置所有用户**：删除 `backend/data/chat.db` 中的 `users` 表记录（或整个库文件），重启后首个注册用户重新成为管理员。
+- **旧数据库升级 v2.2**：启动时自动执行幂等迁移（`chat_sessions` 补 `user_id` 列 + 新建 `users` / `audit_logs` 表），旧会话归入匿名桶，无需手工处理。
+- **API 脚本调用如何认证**：先 `POST /api/auth/login` 拿到 `access_token`，之后每个请求带 `Authorization: Bearer <token>`；不想登录的老脚本不带令牌也能用（匿名桶）。
 - **切换 Embedding 模型后检索为空**：不同嵌入模型向量维度不同，须先清空旧知识库再重传文档（`DELETE /api/kb/{name}/clear`）。
 - **知识库为空时**：对话自动降级为「通用 LLM 直答」模式，不会报错。
 - **Self-RAG Agent 流式说明**：Agent 内部为多节点自检流程，无法透传 token 级流式，后端会按句切分逐块推送（近似打字机效果）；真正的 token 级流式需在生成节点接入 streaming LLM + 异步队列。
