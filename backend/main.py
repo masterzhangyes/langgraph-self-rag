@@ -81,7 +81,7 @@ from api.middleware import (
 )
 
 # 用户认证（JWT 双令牌）与管理后台路由
-from api.auth import router as auth_router, get_optional_user
+from api.auth import router as auth_router, get_optional_user, get_current_user, require_admin
 from api.admin import router as admin_router
 
 # 依赖注入容器
@@ -163,7 +163,7 @@ async def lifespan(app: FastAPI):
     1. 调用 _close_pool() 关闭数据库连接池，释放文件句柄
     """
     # ── 启动日志 ──
-    logger.info(f"智能问答系统 v2.2 启动中...")
+    logger.info(f"智能问答系统 v2.3 启动中...")
     logger.info(f"模型: {settings.LLM_MODEL}")
     logger.info(f"混合检索: {'启用' if settings.ENABLE_HYBRID_RETRIEVAL else '禁用'}")
     logger.info(f"重排序: {'启用' if settings.ENABLE_RERANKING else '禁用'}")
@@ -191,7 +191,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="智能问答系统",
-    version="2.2.0",
+    version="2.3.0",
     description="基于 LangChain RAG 的企业级智能问答系统（含用户认证与管理后台）",
     lifespan=lifespan,
 )
@@ -388,9 +388,17 @@ async def api_chat(req: ChatRequest, user: dict = Depends(get_optional_user)):
     处理流程:
         1. session_id 为空 → 自动创建新会话
         2. kb_names 为空 → 默认使用 "default" 知识库
-        3. 调用 core.rag_chain.chat() → 检索 → 生成 → 返回
-        4. 异常时记录完整堆栈 → 返回 500（不泄露内部细节）
+        3. 知识库访问控制: 仅允许检索本人私有库 / 公共库（他人库 404）
+        4. 调用 core.rag_chain.chat() → 检索 → 生成 → 返回
+        5. 异常时记录完整堆栈 → 返回 500（不泄露内部细节）
     """
+    # ── 知识库访问控制（v2.3）: 在 try 外校验，保证 404 不被吞成 500 ──
+    from infrastructure import kb_store
+    kb_logical = req.kb_names[0] if req.kb_names else "default"
+    kb_row = await kb_store.resolve_readable(kb_logical, user)
+    if kb_row is None:
+        raise HTTPException(status_code=404, detail=f"知识库 [{kb_logical}] 不存在或无权访问")
+
     try:
         from core.rag_chain import chat
         from infrastructure.database import create_session
@@ -400,11 +408,11 @@ async def api_chat(req: ChatRequest, user: dict = Depends(get_optional_user)):
         if not session_id:
             session_id = (await create_session(user_id=user["id"] if user else None))["id"]
 
-        # 调用 RAG 对话引擎
+        # 调用 RAG 对话引擎（传入物理名，天然隔离）
         result = await chat(
             req.query,
             req.history,
-            kb_name=(req.kb_names[0] if req.kb_names else "default"),
+            kb_name=kb_row["physical_name"],
             session_id=session_id,
         )
 
@@ -447,6 +455,13 @@ async def api_chat_stream(req: ChatRequest, user: dict = Depends(get_optional_us
     """
     from core.rag_chain import chat_stream
     from infrastructure.database import create_session
+    from infrastructure import kb_store
+
+    # ── 知识库访问控制（v2.3）: 他人私有库 404，不进入流式阶段 ──
+    kb_logical = req.kb_names[0] if req.kb_names else "default"
+    kb_row = await kb_store.resolve_readable(kb_logical, user)
+    if kb_row is None:
+        raise HTTPException(status_code=404, detail=f"知识库 [{kb_logical}] 不存在或无权访问")
 
     # 自动创建会话
     session_id = req.session_id
@@ -468,10 +483,10 @@ async def api_chat_stream(req: ChatRequest, user: dict = Depends(get_optional_us
             # ── 第一条事件: 告知前端 session_id ──
             yield f"event: session\ndata: {session_id}\n\n"
 
-            # ── 逐 token 推送 ──
+            # ── 逐 token 推送（传入物理名，天然隔离） ──
             async for chunk in chat_stream(
                 req.query, req.history,
-                kb_name=(req.kb_names[0] if req.kb_names else "default"),
+                kb_name=kb_row["physical_name"],
                 session_id=session_id,
             ):
                 # 每个 chunk 是一个字符串（LLM 生成的文本片段）
@@ -506,103 +521,159 @@ async def api_chat_stream(req: ChatRequest, user: dict = Depends(get_optional_us
 
 
 # ═══════════════════════════════════════════════════════════════
-# 知识库管理 API
+# 知识库管理 API（v2.3 起按用户隔离）
 # ═══════════════════════════════════════════════════════════════
 #
-# 知识库 = 命名空间 + Chroma 向量集合 + 文件存储
-#   每个知识库独立建索引，查询时可指定 kb_name 切换
+# 知识库 = 注册表记录 + Chroma 向量集合 + 文件存储
+# 隔离规则（资源级 ACL）:
+#   · 私有库 — 上传时自动归属当前用户，仅本人与管理员可见可写
+#   · 公共库 — owner 为空（含旧版迁移库），所有人可读、仅管理员可写
+#   · 未登录 — 只能读取/检索公共库，写操作一律 401
+# 底层通过「逻辑名 → 物理目录名」映射（infrastructure/kb_store.py）
+# 在存储层杜绝跨用户数据串读。
 
 
 @app.get("/api/kb/list", response_model=KBListResponse)
-async def api_kb_list():
+async def api_kb_list(user: dict = Depends(get_optional_user)):
     """
-    获取所有知识库列表（含统计信息）。
+    获取当前用户可见的知识库列表（含统计与归属信息）。
 
-    GET /api/kb/list
+    GET /api/kb/list  （未登录仅返回公共库）
+
+    隔离规则:
+        · 普通用户 → 本人私有库 + 公共库
+        · 管理员   → 全部知识库（含他人私有库，附所有者用户名）
+        · 未登录   → 仅公共库
 
     返回:
         {
             "knowledge_bases": [
-                {"name": "default", "status": "ready", "chunk_count": 150, "document_count": 3},
-                {"name": "技术文档", "status": "ready", "chunk_count": 300, "document_count": 5},
+                {"name": "default", "status": "active", "chunk_count": 150,
+                 "document_count": 3, "is_public": true, "owner": null},
+                {"name": "我的笔记", "status": "active", "chunk_count": 42,
+                 "document_count": 2, "is_public": false, "owner": "alice"},
             ]
         }
-
-    说明:
-        status 取值:
-            "empty"    → 知识库存在但无数据
-            "loading"  → 正在索引文档
-            "ready"    → 可正常查询
-            "error"    → 索引出错
     """
-    from core.rag_chain import get_all_kb_stats
-    return KBListResponse(knowledge_bases=get_all_kb_stats())
+    from core.rag_chain import get_kb_stats
+    from infrastructure import kb_store
+
+    rows = await kb_store.list_kbs(user)
+    result = [
+        {
+            "name": row["name"],
+            "status": stats.get("status", "empty"),
+            "chunk_count": stats.get("chunk_count", 0),
+            "document_count": stats.get("document_count", 0),
+            "is_public": row["is_public"],
+            "owner": row.get("owner_username"),
+        }
+        for row in rows
+        # 逐库取统计（物理名）；目录已被清空时返回 empty 状态
+        for stats in [get_kb_stats(row["physical_name"])]
+    ]
+
+    # 兜底: 注册表为空时仍展示 default（保持空库部署下的旧版体验）
+    if not any(r["name"] == "default" for r in result):
+        result.append({"name": "default", "status": "empty", "chunk_count": 0,
+                       "document_count": 0, "is_public": True, "owner": None})
+
+    return KBListResponse(knowledge_bases=result)
 
 
 @app.get("/api/kb/{kb_name}/stats", response_model=KBStatsResponse)
-async def api_kb_stats(kb_name: str = "default"):
+async def api_kb_stats(kb_name: str = "default", user: dict = Depends(get_optional_user)):
     """
-    获取指定知识库的详细统计。
+    获取指定知识库的详细统计 — 仅限本人私有库或公共库。
 
-    GET /api/kb/{kb_name}/stats?kb_name=技术文档
+    GET /api/kb/{kb_name}/stats
 
-    返回:
-        {"name": "技术文档", "status": "ready", "chunk_count": 300, "document_count": 5}
+    错误:
+        404 → 知识库不存在或无权访问（不泄露他人库的存在性）
     """
     from core.rag_chain import get_kb_stats
-    return get_kb_stats(kb_name)
+    from infrastructure import kb_store
+
+    kb = await kb_store.resolve_readable(kb_name, user)
+    if kb is None:
+        raise HTTPException(status_code=404, detail=f"知识库 [{kb_name}] 不存在或无权访问")
+    stats = get_kb_stats(kb["physical_name"])
+    return KBStatsResponse(
+        name=kb["name"], status=stats.get("status", "empty"),
+        chunk_count=stats.get("chunk_count", 0),
+        document_count=stats.get("document_count", 0),
+        is_public=kb["is_public"], owner=None,
+    )
 
 
 @app.get("/api/kb/stats", response_model=KBStatsResponse)
 async def api_kb_stats_default():
     """
-    获取默认知识库统计（兼容旧版 API）。
-
-    GET /api/kb/stats
-
-    说明:
-        这是 /api/kb/{kb_name}/stats 的快捷方式，固定查询 "default" 知识库。
-        保留此路由是为了向后兼容旧版前端。
+    获取默认（公共）知识库统计（兼容旧版 API，无需登录）。
     """
     from core.rag_chain import get_kb_stats
-    return get_kb_stats("default")
+    stats = get_kb_stats("default")
+    return KBStatsResponse(name="default", status=stats.get("status", "empty"),
+                           chunk_count=stats.get("chunk_count", 0),
+                           document_count=stats.get("document_count", 0),
+                           is_public=True)
+
+
+async def _resolve_writable_kb(kb_name: str, user: dict) -> dict:
+    """
+    写操作（上传 / 加载网页 / 清空）共用的知识库解析。
+
+    · 本人私有库           → 直接放行
+    · 管理员 + 任意库      → 直接放行
+    · 公共库 + 普通用户    → 403（提示新建个人库）
+    · 不存在               → 返回 None，由调用方新建私有库
+    """
+    from infrastructure import kb_store
+
+    kb, need_create = await kb_store.resolve_writable(kb_name, user)
+    if kb is not None and kb["is_public"] and user["role"] != "admin":
+        raise HTTPException(
+            status_code=403,
+            detail="公共知识库仅管理员可写入，请先新建个人知识库",
+        )
+    if need_create:
+        return await kb_store.register_kb(kb_name, user["id"])
+    return kb
 
 
 @app.post("/api/kb/upload", response_model=UploadResponse)
 async def api_upload(
     files: List[UploadFile] = File(...),   # File(...) 表示必填，支持多文件
     kb_name: str = "default",
+    user: dict = Depends(get_current_user),   # v2.3: 写操作必须登录
 ):
     """
-    上传文档到知识库 — 支持多文件批量上传。
+    上传文档到知识库 — 支持多文件批量上传（需登录）。
 
-    POST /api/kb/upload?kb_name=default
+    POST /api/kb/upload?kb_name=我的笔记
     Body: multipart/form-data, 字段名 "files"（可多选）
+
+    隔离规则:
+        · 目标库不存在 → 自动创建为**当前用户的私有库**
+        · 目标库是本人私有库 → 追加文档
+        · 目标库是公共库 → 仅管理员可写（普通用户 403）
+        · 目标库是他人私有库 → 404（不泄露存在性）
 
     处理流程:
         1. 校验文件格式（.txt / .pdf / .md / .docx / .html）
         2. UUID 重命名 + 安全路径拼接（防止路径遍历攻击）
         3. 流式写入 uploads/ 目录
-        4. 调用 create_knowledge_base() 创建/更新向量索引
-
-    安全措施:
-        · 文件名使用 os.path.basename() 截断路径
-        · UUID 前缀确保唯一性，防止文件名冲突
-        · 扩展名白名单校验，仅允许 SUPPORTED_FILE_TYPES
-
-    返回:
-        {
-            "message": "已处理 3 个文件",
-            "chunk_count": 150,    # 向量数据库中的总块数
-            "file_count": 3,       # 本次上传文件数
-            "kb_name": "default"
-        }
+        4. 调用 create_knowledge_base() 写入用户专属向量目录
 
     错误:
+        401 → 未登录
+        403 → 公共库仅管理员可写
         400 → 不支持的格式
-        413 → 文件过大（可在 Nginx 层限制）
     """
     from core.rag_chain import create_knowledge_base
+    from infrastructure import kb_store
+
+    kb = await _resolve_writable_kb(kb_name, user)
 
     saved_paths = []
 
@@ -618,7 +689,6 @@ async def api_upload(
         # ── 2. 安全命名 ──
         # uuid4().hex → 32 位随机字符串（无特殊字符）
         # os.path.basename → 去除路径部分，仅保留文件名
-        # 示例: "a1b2c3d4..._技术文档.pdf"
         safe_name = f"{uuid.uuid4().hex}_{os.path.basename(file.filename)}"
         file_path = os.path.join(UPLOAD_DIR, safe_name)
 
@@ -631,77 +701,94 @@ async def api_upload(
                 f.write(chunk)
         saved_paths.append(file_path)
 
-    # ── 4. 索引到向量数据库 ──
-    # create_knowledge_base 内部: 加载文档 → 分块 → Embedding → Chroma 写入
-    count = create_knowledge_base(file_paths=saved_paths, kb_name=kb_name)
+    # ── 4. 索引到该用户专属的向量目录（物理名隔离） ──
+    count = create_knowledge_base(file_paths=saved_paths, kb_name=kb["physical_name"])
+    if kb.get("id"):
+        await kb_store.touch_kb(kb["id"])
 
     return UploadResponse(
         message=f"已处理 {len(saved_paths)} 个文件",
         chunk_count=count,
         file_count=len(saved_paths),
-        kb_name=kb_name,
+        kb_name=kb["name"],
     )
 
 
 @app.post("/api/kb/load-web", response_model=UploadResponse)
-async def api_load_web(req: WebLoadRequest):
+async def api_load_web(req: WebLoadRequest, user: dict = Depends(get_current_user)):
     """
-    加载网页到知识库。
+    加载网页到知识库（需登录，隔离规则同 /api/kb/upload）。
 
     POST /api/kb/load-web
     Body: {
-        "urls": ["https://example.com/doc1", "https://example.com/doc2"],
+        "urls": ["https://example.com/doc1"],
         "kb_name": "技术文档"
     }
-
-    处理流程:
-        1. 对每个 URL 发起 HTTP 请求获取 HTML
-        2. BeautifulSoup 提取正文（去除 script / style / nav 等标签）
-        3. 分块 → Embedding → Chroma 写入
-
-    注意:
-        · 仅提取正文文本，不保留 HTML 标签
-        · 不递归爬取子链接
-        · 需要网络访问目标 URL
     """
     from core.rag_chain import create_knowledge_base
+    from infrastructure import kb_store
 
-    count = create_knowledge_base(urls=req.urls, kb_name=req.kb_name)
+    kb = await _resolve_writable_kb(req.kb_name, user)
+
+    count = create_knowledge_base(urls=req.urls, kb_name=kb["physical_name"])
+    if kb.get("id"):
+        await kb_store.touch_kb(kb["id"])
     return UploadResponse(
         message=f"已处理 {len(req.urls)} 个网页",
         chunk_count=count,
         file_count=len(req.urls),
-        kb_name=req.kb_name,
+        kb_name=kb["name"],
     )
 
 
 @app.delete("/api/kb/{kb_name}/clear")
-async def api_clear_kb(kb_name: str = "default"):
+async def api_clear_kb(kb_name: str = "default", user: dict = Depends(get_current_user)):
     """
-    清空指定知识库（仅删除向量数据，不删除上传文件）。
+    清空指定知识库 — 仅限本人私有库；公共库与他人私有库仅管理员可清（需登录）。
 
     DELETE /api/kb/{kb_name}/clear
 
-    说明:
-        · 调用 Chroma 客户端的 delete_collection() 删除整个集合
-        · 上传的源文件保留在 uploads/ 目录（可重新索引）
-        · 不可逆操作，清空后需重新上传文档才能查询
+    错误:
+        401 → 未登录
+        403 → 公共库仅管理员可清空
+        404 → 知识库不存在或无权访问
     """
     from core.rag_chain import clear_knowledge_base
-    clear_knowledge_base(kb_name)
-    return {"message": f"知识库 [{kb_name}] 已清空"}
+    from infrastructure import kb_store
+    from infrastructure.user_store import record_audit
+
+    # 解析: 本人私有 → 管理员任意 → 公共（管理员放行）
+    kb = await kb_store.get_kb(kb_name, user["id"])
+    if kb is None:
+        if user["role"] == "admin":
+            kb = await kb_store.get_kb_any(kb_name)
+        if kb is None:
+            kb = await kb_store.get_kb(kb_name, None)
+            if kb is not None and user["role"] != "admin":
+                raise HTTPException(status_code=403, detail="公共知识库仅管理员可清空")
+    if kb is None:
+        # 遗留兼容: 未注册的 default 目录仅管理员可清
+        if kb_name == "default" and user["role"] == "admin":
+            kb = {"name": "default", "physical_name": "default", "is_public": True}
+        else:
+            raise HTTPException(status_code=404, detail=f"知识库 [{kb_name}] 不存在或无权访问")
+
+    clear_knowledge_base(kb["physical_name"])
+
+    # 破坏性操作留痕，供管理后台审计回溯
+    await record_audit(
+        user_id=user["id"], username=user["username"], action="kb.clear",
+        detail=f"清空知识库 [{kb['name']}]（物理目录 chroma_{kb['physical_name']}）",
+    )
+    return {"message": f"知识库 [{kb['name']}] 已清空"}
 
 
 @app.delete("/api/kb/clear")
-async def api_clear_kb_default():
+async def api_clear_kb_default(admin: dict = Depends(require_admin)):
     """
-    清空默认知识库 + 清理上传目录（兼容旧版）。
+    清空默认公共知识库 + 清理上传目录（仅管理员，兼容旧版）。
 
     DELETE /api/kb/clear
-
-    说明:
-        比 /api/kb/default/clear 更彻底 — 同时删除 uploads/ 下所有文件。
-        保留此路由是为了向后兼容旧版前端。
     """
     from core.rag_chain import clear_knowledge_base
 
@@ -730,6 +817,7 @@ async def api_clear_kb_default():
 async def api_evaluate(
     req: EvaluationRequest,
     deps: RAGDependencies = Depends(get_deps),  # 依赖注入: 获取单例 evaluator
+    user: dict = Depends(get_optional_user),    # v2.3: 知识库访问控制
 ):
     """
     批量 RAG 质量评估。
@@ -765,6 +853,12 @@ async def api_evaluate(
         }
     """
     from core.rag_chain import chat
+    from infrastructure import kb_store
+
+    # ── 知识库访问控制（v2.3）: 仅允许评估本人私有库 / 公共库 ──
+    kb_row = await kb_store.resolve_readable(req.kb_name, user)
+    if kb_row is None:
+        raise HTTPException(status_code=404, detail=f"知识库 [{req.kb_name}] 不存在或无权访问")
 
     # 定义 RAG 回调函数 — 评估器通过此函数获取 (答案, 来源) 对
     async def rag_fn(query: str):
@@ -777,7 +871,7 @@ async def api_evaluate(
         评估器对每个 question 都调用此函数，
         拿到答案和上下文后计算三项质量指标。
         """
-        result = await chat(query, kb_name=req.kb_name)
+        result = await chat(query, kb_name=kb_row["physical_name"])
         return result["answer"], result.get("sources", [])
 
     # 批量评估

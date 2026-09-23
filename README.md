@@ -1,8 +1,9 @@
-# 智能问答系统 v2.2
+# 智能问答系统 v2.3
 
 > 基于 **LangChain RAG** + **LangGraph Agent** 的智能问答平台
 > 默认使用 **智谱清言 `glm-4-flash` 免费模型**（OpenAI 兼容 API，可随时切换其它厂商）
 > v2.2 新增：**JWT 用户认证 + 多用户会话隔离 + 管理后台（RBAC / 审计日志 / 运营统计）**
+> v2.3 新增：**按用户隔离的知识库（私有库 / 公共库 + 资源级 ACL）**
 <img width="2876" height="1472" alt="fb5dee4b-a661-491e-8691-f2bb221d1bdd" src="https://github.com/user-attachments/assets/353a3138-4500-4268-962d-91ebea2e85bb" />
 <img width="2864" height="1468" alt="8ef9d138-e37f-4586-80ee-787567582728" src="https://github.com/user-attachments/assets/5d40fe2b-d64a-4507-b05c-c038842ab696" />
 
@@ -33,6 +34,17 @@
 - **防爆破**：同一 (IP, 用户名) 连续登录失败超过阈值（默认 5 次）临时锁定（默认 5 分钟）
 - **引导约定**：**首个注册的用户自动成为管理员**，之后注册的均为普通用户
 - **会话隔离**：每个用户的对话会话按 `user_id` 隔离，互相不可见；未携带令牌的请求落入匿名桶（兼容旧客户端 / 脚本调用）
+
+### 知识库隔离（v2.3）
+
+会话之外，**知识库也按用户隔离**（多租户资源级 ACL）：
+
+- **私有库**：登录用户上传文档时自动创建，归属该用户——列表、检索、清空均仅限本人（及管理员）
+- **公共库**：所有人可读可检索，仅管理员可写入；v2.3 升级前遗留的知识库目录启动时自动迁移注册为公共库
+- **存储层隔离**：用户眼中的库名（逻辑名）与磁盘向量目录（物理名 `u{user_id}__{name}` / `pub__{name}`）解耦，跨用户同名库映射到不同目录，**存储层杜绝数据串读**
+- **越权防护**：访问他人私有库统一返回 404（不泄露存在性）；未登录写操作返回 401；公共库写保护返回 403
+- **检索入口全覆盖**：对话（`/api/chat`、`/api/chat/stream`）与质量评估（`/api/evaluate`）均经过同一套知识库访问控制
+- **破坏性操作审计**：清空知识库写入 `audit_logs`，管理后台可回溯
 
 ### 管理后台（仅 admin 可见）
 
@@ -95,13 +107,15 @@
 │   │   └── evaluation.py      # RAG 质量评估 (3 指标)
 │   │
 │   ├── infrastructure/        # 基础设施
-│   │   ├── database.py        # SQLite 会话持久化（含 v2.2 幂等迁移）
+│   │   ├── database.py        # SQLite 会话持久化（含 v2.2/v2.3 幂等迁移）
 │   │   ├── user_store.py      # 用户 / 审计日志 / 管理统计数据层
+│   │   ├── kb_store.py        # 知识库注册表（v2.3: 逻辑名→物理名映射 + ACL）
 │   │   └── dependencies.py    # 依赖注入容器
 │   │
 │   └── tests/                 # 单元测试（conftest 自动 mock，无需真实 Key）
 │       ├── conftest.py
 │       ├── test_auth.py       # 密码哈希 / JWT / 防爆破 / 注册校验
+│       ├── test_kb_isolation.py # 知识库用户隔离 / 越权防护（v2.3）
 │       ├── test_retriever.py
 │       ├── test_reranker.py
 │       └── test_evaluation.py
@@ -270,13 +284,13 @@ LLM_MODEL=qwen2.5:7b
 | `POST` | `/api/sessions` | 新建会话 |
 | `GET` | `/api/sessions/{id}` | 会话详情（仅归属者） |
 | `DELETE` | `/api/sessions/{id}` | 删除会话（仅归属者） |
-| `GET` | `/api/kb/list` | 知识库列表 |
-| `GET` | `/api/kb/stats` | 全部知识库统计 |
-| `GET` | `/api/kb/{name}/stats` | 指定知识库统计 |
-| `POST` | `/api/kb/upload` | 上传文档 |
-| `POST` | `/api/kb/load-web` | 加载网页 |
-| `DELETE` | `/api/kb/{name}/clear` | 清空指定知识库 |
-| `DELETE` | `/api/kb/clear` | 清空全部知识库 |
+| `GET` | `/api/kb/list` | 知识库列表（按用户隔离：本人私有 + 公共；admin 全量） |
+| `GET` | `/api/kb/stats` | 默认公共知识库统计 |
+| `GET` | `/api/kb/{name}/stats` | 指定知识库统计（仅本人私有 / 公共库） |
+| `POST` | `/api/kb/upload` | 上传文档（需登录；新名称自动创建为个人私有库） |
+| `POST` | `/api/kb/load-web` | 加载网页（需登录，权限同上传） |
+| `DELETE` | `/api/kb/{name}/clear` | 清空指定知识库（本人私有；公共/他人库仅 admin） |
+| `DELETE` | `/api/kb/clear` | 清空默认公共库 + 上传目录（仅 admin） |
 | `POST` | `/api/evaluate` | RAG 质量评估 |
 | `GET` | `/api/health` | 健康检查 |
 
@@ -285,11 +299,12 @@ LLM_MODEL=qwen2.5:7b
 - **用户认证**: JWT 双令牌（access + refresh）+ bcrypt 密码哈希 + 登录防爆破
 - **RBAC 权限**: user / admin 两级角色，管理后台全端点守卫
 - **多用户会话隔离**: 会话按 `user_id` 隔离，支持越权防护（IDOR）与匿名兼容
+- **知识库用户隔离（v2.3）**: 私有库 / 公共库 + 逻辑名→物理名映射，检索入口全覆盖 ACL，破坏性操作审计
 - **管理后台**: 运营统计 / 用户管理 / 会话审计 / 操作日志
 - **混合检索**: BM25 (jieba 中文分词) + Dense Embedding + RRF 融合
 - **重排序**: BGE-Reranker Cross-Encoder 精排 / LLM 打分（默认关闭，`.env` 设 `ENABLE_RERANKING=true` 开启）
 - **Self-RAG Agent**: LangGraph 6 节点状态图（查询扩展→检索→相关性评估→生成→幻觉检测，默认开启）
-- **多知识库**: 命名隔离，独立 Chroma 目录
+- **多知识库**: 命名隔离，独立 Chroma 目录，按用户隔离（v2.3）
 - **流式输出**: SSE 打字机效果，支持中止生成
 - **会话持久化**: SQLite 存储历史对话
 - **质量评估**: Faithfulness / Answer Relevancy / Context Relevancy
@@ -309,6 +324,7 @@ pytest            # 等价于 pytest tests/ -v（由 pytest.ini 指定目录与�
 
 - **忘记管理员密码 / 想重置所有用户**：删除 `backend/data/chat.db` 中的 `users` 表记录（或整个库文件），重启后首个注册用户重新成为管理员。
 - **旧数据库升级 v2.2**：启动时自动执行幂等迁移（`chat_sessions` 补 `user_id` 列 + 新建 `users` / `audit_logs` 表），旧会话归入匿名桶，无需手工处理。
+- **旧数据库升级 v2.3**：启动时自动扫描磁盘上的 `chroma_*` 目录并注册为**公共知识库**（所有人可读、仅管理员可写），检索行为与升级前一致；之后用户新建的库均为个人私有库。
 - **API 脚本调用如何认证**：先 `POST /api/auth/login` 拿到 `access_token`，之后每个请求带 `Authorization: Bearer <token>`；不想登录的老脚本不带令牌也能用（匿名桶）。
 - **切换 Embedding 模型后检索为空**：不同嵌入模型向量维度不同，须先清空旧知识库再重传文档（`DELETE /api/kb/{name}/clear`）。
 - **知识库为空时**：对话自动降级为「通用 LLM 直答」模式，不会报错。

@@ -188,8 +188,9 @@ class WebLoadRequest(BaseModel):
 class KBStatsResponse(BaseModel):
     """
     知识库统计信息模型
-    
+
     返回单个知识库的核心统计数据，用于列表展示或快速查看知识库概况。
+    v2.3 起附带归属信息（按用户隔离）。
     """
     # 知识库名称
     name: str
@@ -199,6 +200,10 @@ class KBStatsResponse(BaseModel):
     chunk_count: int
     # 原始文档总数
     document_count: int
+    # 是否公共知识库（所有人可读，仅管理员可写）
+    is_public: bool = False
+    # 所有者用户名（公共库为 None）
+    owner: Optional[str] = None
 
 
 class KBListResponse(BaseModel):

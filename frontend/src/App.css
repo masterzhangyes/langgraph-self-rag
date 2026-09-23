@@ -1401,6 +1401,25 @@ html.dark .app-container::after {
   white-space: nowrap;
   color: var(--text-primary);
 }
+
+/* 知识库归属标签（v2.3: 公共 / 个人） */
+.kb-scope-tag {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  vertical-align: middle;
+}
+.kb-scope-tag.public {
+  background: rgba(59, 130, 246, 0.14);
+  color: var(--accent, #3b82f6);
+}
+.kb-scope-tag.private {
+  background: rgba(16, 185, 129, 0.14);
+  color: #10b981;
+}
 .kb-section h3 { display: flex; align-items: center; gap: 6px; }
 .kb-section .btn-text { display: inline-flex; align-items: center; gap: 4px; }
 .btn-refresh {

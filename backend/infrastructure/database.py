@@ -140,6 +140,20 @@ async def init_db():
                 created_at TEXT NOT NULL
             );
 
+            -- 知识库注册表（v2.3 新增）
+            -- 实现按用户隔离的知识库: owner_id 为 NULL 表示公共库
+            -- （所有人可读、仅管理员可写）
+            -- physical_name 为磁盘目录名（chroma_{physical_name}），与逻辑名解耦:
+            --   私有库 "u{owner_id}__{name}"、公共库 "pub__{name}"、旧库沿用原名
+            CREATE TABLE IF NOT EXISTS knowledge_bases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                owner_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                physical_name TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
             -- 索引
             CREATE INDEX IF NOT EXISTS idx_messages_session 
                 ON chat_messages(session_id, id);
@@ -147,6 +161,9 @@ async def init_db():
                 ON chat_sessions(updated_at DESC);
             CREATE INDEX IF NOT EXISTS idx_audit_created 
                 ON audit_logs(created_at DESC);
+            -- （owner, name) 唯一: SQLite 中 NULL 互不相等，用 ifnull 归一化后建表达式索引
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_kb_owner_name
+                ON knowledge_bases(ifnull(owner_id, -1), name);
         """)
         await conn.commit()
 
@@ -167,6 +184,28 @@ async def init_db():
             "ON chat_sessions(user_id, updated_at DESC)"
         )
         await conn.commit()
+
+        # ── 幂等迁移：把磁盘上已存在的旧知识库目录注册为公共知识库 ──
+        # v2.3 之前知识库无归属概念；升级后统一归入「公共库」桶:
+        # 所有人可读（保持现有检索行为），仅管理员可写。
+        # INSERT OR IGNORE 依赖唯一索引，重复执行无副作用。
+        kb_base = os.path.dirname(settings.VECTOR_DB_PATH) or "."
+        if os.path.isdir(kb_base):
+            now = datetime.now().isoformat()
+            for item in os.listdir(kb_base):
+                kb_dir = os.path.join(kb_base, item)
+                if not (item.startswith("chroma_") and os.path.isdir(kb_dir)):
+                    continue
+                physical = item[len("chroma_"):]
+                if not physical or not os.listdir(kb_dir):
+                    continue  # 跳过空目录与畸形名
+                await conn.execute(
+                    "INSERT OR IGNORE INTO knowledge_bases "
+                    "(name, owner_id, physical_name, created_at, updated_at) "
+                    "VALUES (?, NULL, ?, ?, ?)",
+                    (physical, physical, now, now),
+                )
+            await conn.commit()
     finally:
         await conn.close()
 

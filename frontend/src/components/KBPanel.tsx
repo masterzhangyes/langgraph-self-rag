@@ -20,6 +20,10 @@ export interface KBItem {
   status: string
   chunk_count: number
   document_count?: number
+  /** 是否公共知识库（所有人可读，仅管理员可写） */
+  is_public?: boolean
+  /** 所有者用户名（公共库为 null） */
+  owner?: string | null
 }
 
 interface KBPanelProps {
@@ -166,7 +170,14 @@ export default function KBPanel({
             {kbReady ? '已就绪' : currentKb.status === 'loading' ? '索引中…' : '未加载'}
           </span>
         </div>
-        <div className="kb-name">{activeKb || 'default'}</div>
+        <div className="kb-name">
+          {activeKb || 'default'}
+          {currentKb.is_public ? (
+            <span className="kb-scope-tag public" title="所有人可读，仅管理员可写">公共</span>
+          ) : (
+            <span className="kb-scope-tag private" title="仅你和管理员可见">个人</span>
+          )}
+        </div>
         <div className="kb-stats-grid">
           <div className="kb-stat">
             <span className="stat-num">{currentKb.chunk_count ?? 0}</span>
@@ -192,8 +203,9 @@ export default function KBPanel({
             onChange={e => setActiveKb(e.target.value)}
           >
             {kbList.map(kb => (
-              <option key={kb.name} value={kb.name}>
-                {kb.name}（{kb.chunk_count} 块）
+              <option key={`${kb.name}-${kb.is_public ? 'pub' : 'pvt'}`} value={kb.name}>
+                {kb.name}（{kb.chunk_count} 块）{kb.is_public ? ' · 公共' : ''}
+                {!kb.is_public && kb.owner ? ` · ${kb.owner}` : ''}
               </option>
             ))}
           </select>
