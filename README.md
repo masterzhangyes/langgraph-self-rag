@@ -4,6 +4,7 @@
 > 默认使用 **智谱清言 `glm-4-flash` 免费模型**（OpenAI 兼容 API，可随时切换其它厂商）
 > v2.2 新增：**JWT 用户认证 + 多用户会话隔离 + 管理后台（RBAC / 审计日志 / 运营统计）**
 > v2.3 新增：**按用户隔离的知识库（私有库 / 公共库 + 资源级 ACL）**
+> v2.3.1 修复：**BM25 检索 Top-K 排序错位、Self-RAG 查询扩展崩溃、并发优化与全链路注释**
 <img width="2876" height="1472" alt="fb5dee4b-a661-491e-8691-f2bb221d1bdd" src="https://github.com/user-attachments/assets/353a3138-4500-4268-962d-91ebea2e85bb" />
 <img width="2864" height="1468" alt="8ef9d138-e37f-4586-80ee-787567582728" src="https://github.com/user-attachments/assets/5d40fe2b-d64a-4507-b05c-c038842ab696" />
 
@@ -309,6 +310,19 @@ LLM_MODEL=qwen2.5:7b
 - **会话持久化**: SQLite 存储历史对话
 - **质量评估**: Faithfulness / Answer Relevancy / Context Relevancy
 - **双主题**: 亮色/暗色模式，偏好持久化
+
+## 更新记录
+
+### v2.3.1（bug 修复与优化）
+
+| 模块 | 修复 / 优化 |
+|---|---|
+| `services/retriever.py` | 修复 BM25 检索两个 bug：① Top-K 误按"前 k 个下标"而非分数选取，稀疏路排序形同虚设、污染 RRF 融合排名；② 索引与文档顺序错位隐患（建索引时快照文档列表与索引一起持久化，检索不再每次全量拉取 Chroma） |
+| `core/agent.py` | 修复 Self-RAG 崩溃：LLM 查询扩展偶尔返回嵌套 JSON 列表，原校验未过滤导致 list 传入 embedding 报 `TypeError`，触发"降级到简化流程"。新增结构归一化 + 第二道防御 |
+| `services/evaluation.py` | 评估流程并发优化与防御性修复 |
+| `services/reranker.py` | 重排序并发与降级路径修复 |
+| `infrastructure/database.py` | 统计 SQL 与连接管理修复 |
+| 全模块 | 核心文件补充面向学习的详细中文注释（`admin.py` / `retriever.py` / `reranker.py` / `evaluation.py` / `database.py`） |
 
 ## 运行测试
 
