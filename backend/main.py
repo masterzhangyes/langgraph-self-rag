@@ -560,8 +560,12 @@ async def api_kb_list(user: dict = Depends(get_optional_user)):
     from infrastructure import kb_store
 
     rows = await kb_store.list_kbs(user)
-    result = [
-        {
+
+    # 🐛 修复: get_kb_stats 内含同步 Chroma 初始化（磁盘 IO），
+    # 逐库在 async 路由中直接调用会阻塞事件循环 —— 放线程池
+    async def _row_with_stats(row: dict) -> dict:
+        stats = await asyncio.to_thread(get_kb_stats, row["physical_name"])
+        return {
             "name": row["name"],
             "status": stats.get("status", "empty"),
             "chunk_count": stats.get("chunk_count", 0),
@@ -569,10 +573,8 @@ async def api_kb_list(user: dict = Depends(get_optional_user)):
             "is_public": row["is_public"],
             "owner": row.get("owner_username"),
         }
-        for row in rows
-        # 逐库取统计（物理名）；目录已被清空时返回 empty 状态
-        for stats in [get_kb_stats(row["physical_name"])]
-    ]
+
+    result = [await _row_with_stats(row) for row in rows]
 
     # 兜底: 注册表为空时仍展示 default（保持空库部署下的旧版体验）
     if not any(r["name"] == "default" for r in result):
@@ -813,8 +815,12 @@ async def api_upload(
                 f.write(chunk)
         saved_paths.append(file_path)
 
-    # ── 4. 索引到该用户专属的向量目录（物理名隔离） ──
-    count = create_knowledge_base(file_paths=saved_paths, kb_name=kb["physical_name"])
+    # ── 4. 索引到该用户专属的向量目录（物理名隔离）──
+    # 🐛 修复: create_knowledge_base 含文档解析 + Embedding 向量化 + BM25 构建，
+    # 全程同步且可达数十秒，直接调用会卡死事件循环（期间所有请求冻结）—— 放线程池
+    count = await asyncio.to_thread(
+        create_knowledge_base, file_paths=saved_paths, kb_name=kb["physical_name"]
+    )
     if kb.get("id"):
         await kb_store.touch_kb(kb["id"])
 
@@ -842,7 +848,10 @@ async def api_load_web(req: WebLoadRequest, user: dict = Depends(get_current_use
 
     kb = await _resolve_writable_kb(req.kb_name, user)
 
-    count = create_knowledge_base(urls=req.urls, kb_name=kb["physical_name"])
+    # 🐛 修复: 同步重操作（网页抓取 + 向量化）放线程池，避免阻塞事件循环
+    count = await asyncio.to_thread(
+        create_knowledge_base, urls=req.urls, kb_name=kb["physical_name"]
+    )
     if kb.get("id"):
         await kb_store.touch_kb(kb["id"])
     return UploadResponse(
@@ -885,7 +894,8 @@ async def api_clear_kb(kb_name: str = "default", user: dict = Depends(get_curren
         else:
             raise HTTPException(status_code=404, detail=f"知识库 [{kb_name}] 不存在或无权访问")
 
-    clear_knowledge_base(kb["physical_name"])
+    # 🐛 修复: rmtree 同步 IO 放线程池，避免阻塞事件循环
+    await asyncio.to_thread(clear_knowledge_base, kb["physical_name"])
 
     # 破坏性操作留痕，供管理后台审计回溯
     await record_audit(
@@ -904,8 +914,8 @@ async def api_clear_kb_default(admin: dict = Depends(require_admin)):
     """
     from core.rag_chain import clear_knowledge_base
 
-    # 清空向量数据
-    clear_knowledge_base("default")
+    # 清空向量数据（同步 IO 放线程池）
+    await asyncio.to_thread(clear_knowledge_base, "default")
 
     # 清理上传文件目录
     if os.path.exists(UPLOAD_DIR):
@@ -1045,9 +1055,10 @@ async def health():
     # ── 基础信息 ──
     checks = {
         "status": "ok",
-        "version": "2.2.0",
+        "version": "2.3.0",  # 🐛 修复: 与 FastAPI 应用版本对齐（此前硬编码 2.2.0）
         "model": settings.LLM_MODEL,
-        "kb_count": len(get_all_kb_stats()),
+        # 🐛 修复: get_all_kb_stats 同步 Chroma 初始化放线程池，避免阻塞事件循环
+        "kb_count": len(await asyncio.to_thread(get_all_kb_stats)),
         "features": {
             "hybrid_retrieval": settings.ENABLE_HYBRID_RETRIEVAL,
             "reranking": settings.ENABLE_RERANKING,

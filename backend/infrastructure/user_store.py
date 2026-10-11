@@ -265,7 +265,8 @@ async def get_admin_stats() -> dict:
             """
         )
         row = dict(await cursor.fetchone())
-        row["active_users"] = bool(row.get("active_users"))
+        # 🐛 修复: active_users 是 COUNT(*) 计数，此前被误转成 bool
+        # （管理后台"活跃用户"永远显示 true），保留原始整数
         return row
     finally:
         await _release_conn(conn)

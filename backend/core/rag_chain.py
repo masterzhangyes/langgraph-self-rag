@@ -812,11 +812,14 @@ async def _agent_chat_stream(
 
     # 构建 Agent 回调函数
     # Agent 通过这些回调与外部交互（检索、生成），实现解耦设计
+    # ⚠️ generate_fn 必须接收 (query, docs, history) 三参 ——
+    #    agent._generate 节点以 3 参调用，签名不匹配会 TypeError
+    #    并被上层 except 吞掉降级（v2.4 前的隐藏 bug，Agent 从未真正生效）
     async def retrieve_fn(q: str) -> List[dict]:
         """检索回调: 执行混合检索 + 重排序"""
         return await retrieve_with_rerank(q, kb_name)
 
-    async def generate_fn(q: str, docs: List[dict]) -> str:
+    async def generate_fn(q: str, docs: List[dict], history: list = None) -> str:
         """
         生成回调: 基于检索文档生成回答
         有文档时使用 RAG 模式，无文档时降级为通用模式
@@ -835,6 +838,16 @@ async def _agent_chat_stream(
             )
             return result.content
 
+    # 历史归一化为 dict 列表（兼容 Pydantic 对象与裸 dict），
+    # 供 Agent 的查询扩展节点理解多轮上下文
+    history_dicts = [
+        {
+            "role": (m.role if hasattr(m, "role") else m.get("role", "user")),
+            "content": (m.content if hasattr(m, "content") else m.get("content", "")),
+        }
+        for m in (history or [])
+    ]
+
     # 创建 Self-RAG Agent 实例
     agent = SelfRAGAgent(
         llm=deps.llm_no_stream,
@@ -845,7 +858,7 @@ async def _agent_chat_stream(
 
     try:
         # 运行 Agent（内部会执行完整的自检流程）
-        result = await agent.run(standalone_query)
+        result = await agent.run(standalone_query, history_dicts)
         answer = result.get("answer", "")
         sources = result.get("retrieved_docs", [])
     except Exception as e:
@@ -1049,11 +1062,11 @@ async def _agent_chat(
     else:
         standalone_query = query
 
-    # 构建 Agent 回调
+    # 构建 Agent 回调（签名必须与 agent._generate 的 3 参调用对齐，见 _agent_chat_stream 注释）
     async def retrieve_fn(q: str) -> List[dict]:
         return await retrieve_with_rerank(q, kb_name)
 
-    async def generate_fn(q: str, docs: List[dict]) -> str:
+    async def generate_fn(q: str, docs: List[dict], history: list = None) -> str:
         if docs:
             context = _format_context(docs)
             qa_prompt = ChatPromptTemplate.from_messages([
@@ -1068,6 +1081,15 @@ async def _agent_chat(
             )
             return result.content
 
+    # 历史归一化为 dict 列表（供查询扩展节点使用多轮上下文）
+    history_dicts = [
+        {
+            "role": (m.role if hasattr(m, "role") else m.get("role", "user")),
+            "content": (m.content if hasattr(m, "content") else m.get("content", "")),
+        }
+        for m in (history or [])
+    ]
+
     # 创建并运行 Agent
     agent = SelfRAGAgent(
         llm=deps.llm_no_stream,
@@ -1077,7 +1099,7 @@ async def _agent_chat(
     )
 
     try:
-        result = await agent.run(standalone_query)
+        result = await agent.run(standalone_query, history_dicts)
         answer = result.get("answer", "")
         sources = result.get("retrieved_docs", [])
         kb_status = "active" if sources else "empty"

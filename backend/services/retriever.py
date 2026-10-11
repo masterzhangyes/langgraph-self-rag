@@ -170,8 +170,9 @@ class HybridRetriever:
             [(Document, score), ...] 按分数降序，score 已归一化到 [0, 1]。
         """
         # 索引未就绪（空库 / 尚未构建 / 快照缺失）时返回空列表 ——
-        # 上层 search() 会因 sparse 为空而自然退化为纯向量检索
-        if self.bm25 is None or self._bm25_docs is None:
+        # 上层 search() 会因 sparse 为空而自然退化为纯向量检索。
+        # getattr 防御: 测试代码用 __new__ 跳过 __init__ 时属性不存在
+        if self.bm25 is None or getattr(self, "_bm25_docs", None) is None:
             return []
 
         k = k or self._dense_k

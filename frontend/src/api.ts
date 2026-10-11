@@ -34,17 +34,62 @@ export function isAuthenticated(): boolean {
 /** 令牌失效事件名（App 层监听） */
 export const UNAUTHORIZED_EVENT = 'qa:unauthorized'
 
-export async function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
+/**
+ * 🐛 修复: 静默续期单飞锁。
+ * 此前任何 401 都直接清除双令牌 —— access token 到期（默认 30 分钟）后
+ * 连仍有效的 refresh token 一并销毁，用户被强制登出，续期机制形同虚设。
+ * 现在: 401 → 用 refresh token 续期（并发请求只发起一次）→ 重试原请求；
+ *       仅当续期也失败（refresh 过期/无效）才清除令牌并广播登出。
+ */
+let refreshInFlight: Promise<boolean> | null = null
+
+async function trySilentRefresh(): Promise<boolean> {
+  const refresh = getRefreshToken()
+  if (!refresh) return false
+  try {
+    // 用裸 fetch 而非 apiFetch，避免 401 重试递归
+    const res = await fetch('/api/auth/refresh', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refresh_token: refresh }),
+    })
+    if (!res.ok) return false
+    const data = await res.json()
+    if (data?.access_token && data?.refresh_token) {
+      setTokens(data.access_token, data.refresh_token)
+      return true
+    }
+    return false
+  } catch {
+    return false
+  }
+}
+
+function buildInitWithAuth(path: string, init: RequestInit): RequestInit {
   const headers = new Headers(init.headers || {})
   const token = getAccessToken()
   if (token) headers.set('Authorization', `Bearer ${token}`)
   if (init.body && !(init.body instanceof FormData) && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json')
   }
-  const res = await fetch(path, { ...init, headers })
+  return { ...init, headers }
+}
+
+export async function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  let res = await fetch(path, buildInitWithAuth(path, init))
+
   if (res.status === 401) {
-    clearTokens()
-    window.dispatchEvent(new Event(UNAUTHORIZED_EVENT))
+    // 单飞: 并发的多个 401 请求共享同一次续期
+    refreshInFlight = refreshInFlight ?? trySilentRefresh()
+    const refreshed = await refreshInFlight.finally(() => { refreshInFlight = null })
+    if (refreshed) {
+      // 续期成功 → 带新令牌重试原请求一次
+      res = await fetch(path, buildInitWithAuth(path, init))
+    } else {
+      // 续期失败 → 真正的会话过期，清除并广播
+      clearTokens()
+      window.dispatchEvent(new Event(UNAUTHORIZED_EVENT))
+    }
   }
   return res
 }

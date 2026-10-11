@@ -12,8 +12,6 @@ from core.config import settings
 
 logger = logging.getLogger("qa.dependencies")
 
-__slots__ = ("_llm", "_llm_no_stream", "_embeddings", "_evaluator", "_reranker")
-
 
 class RAGDependencies:
     """RAG 依赖容器，所有重量级对象使用懒加载 (@property)"""
