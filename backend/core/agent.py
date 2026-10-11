@@ -284,8 +284,13 @@ class SelfRAGAgent:
             result = await chain.ainvoke({})
             # 尝试将 LLM 输出解析为 JSON 列表
             expanded = json.loads(result.strip())
-            # 验证解析结果：必须是包含至少一个元素的列表
-            if isinstance(expanded, list) and len(expanded) > 0:
+            # 🐛 修复: LLM 偶尔返回嵌套结构（如 [["子查询1","子查询2"]]），
+            # 原校验只验证"是列表且非空"，嵌套的 list 元素会被原样拼入，
+            # 后续 _retrieve 把 list 当查询字符串传给 embedding 直接崩溃
+            # （TypeError: 'list' object cannot be converted to 'PyString'）。
+            # 此处做结构归一化：展平一层 + 只保留非空字符串元素
+            expanded = self._flatten_queries(expanded)
+            if expanded:
                 # 将原始查询放在列表首位，确保原始意图也被检索
                 expanded = [query] + expanded
             else:
@@ -298,6 +303,36 @@ class SelfRAGAgent:
         logger.info(f"Query expanded: {expanded}")
         # 将扩展后的查询列表写入状态
         return {"expanded_queries": expanded}
+
+    @staticmethod
+    def _flatten_queries(data: Any) -> List[str]:
+        """
+        将 LLM 返回的查询扩展结果归一化为纯字符串列表。
+
+        兼容三种常见输出形态:
+          ["查询1", "查询2"]                          → 标准形态，原样保留
+          [["查询1", "查询2"]]                        → 嵌套一层，展平
+          [["查询1", "查询2"], "查询3"]               → 混合，展平 + 保留散字符串
+
+        任何非字符串元素（dict/数字/None/更深嵌套）一律丢弃，
+        保证出口列表的每个元素都是非空 str，可直接用于检索。
+        """
+        if not isinstance(data, list):
+            return []
+        flat: List[str] = []
+        for item in data:
+            if isinstance(item, str):
+                s = item.strip()
+                if s:
+                    flat.append(s)
+            elif isinstance(item, list):
+                # 只展平一层；更深的嵌套结构视为脏数据丢弃
+                for sub in item:
+                    if isinstance(sub, str):
+                        s = sub.strip()
+                        if s:
+                            flat.append(s)
+        return flat
 
     async def _retrieve(self, state: AgentState) -> dict:
         """
@@ -322,7 +357,12 @@ class SelfRAGAgent:
         seen = set()    # 用于去重的集合，存储已见过的文档标识
 
         # 遍历每个扩展查询，分别调用检索回调
+        # 🛡️ 防御: 任何非字符串元素直接跳过，杜绝 list/dict 漏进
+        # embedding 层（上游 _expand_query 已归一化，此处是第二道保险）
         for q in queries:
+            if not isinstance(q, str) or not q.strip():
+                logger.warning(f"_retrieve 跳过非法查询元素: {type(q).__name__}")
+                continue
             docs = await self.retrieve(q)
             for doc in docs:
                 # 用文档内容的前 100 个字符作为去重标识
